@@ -1,0 +1,17 @@
+[package]
+name = "rewind-system"
+version = "0.1.0"
+authors = ["Damien Aumaitre <daumaitre@quarkslab.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+pdb = "0.6.0"
+deku = "0.9.1"
+reqwest = { version = "0.10.9", features = ["blocking"] }
+thiserror = "1.0.22"
+anyhow = "1.0.28"
+
+rewind-snapshot = { path = "../rewind-snapshot" }
+rewind-core = { path = "../rewind-core" }
