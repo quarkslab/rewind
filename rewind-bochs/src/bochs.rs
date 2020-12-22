@@ -1,13 +1,12 @@
 
 use std::convert::TryInto;
-use std::collections::HashMap;
 use std::collections::BTreeSet;
 use std::time::Instant;
 
 use anyhow::Result;
 
 use rewind_core::mem;
-use rewind_core::trace::{ProcessorState as InitialContext, Context, Params, Tracer, Trace, EmulationStatus};
+use rewind_core::trace::{self, ProcessorState, Context, Params, Tracer, Trace, EmulationStatus};
 use rewind_core::snapshot::Snapshot;
 
 use bochscpu::cpu::{Cpu, RunState, State, Seg, GlobalSeg};
@@ -44,24 +43,28 @@ impl From<State> for LocalContext {
 
 }
 
+// FIXME: only trace struct
 #[derive(CustomDebug)]
-struct BochsHooks {
+struct BochsHooks<'a> {
     singlestep: bool,
-    return_address: u64,
-    excluded_addresses: HashMap<String, u64>,
+    // return_address: u64,
+    // excluded_addresses: HashMap<String, u64>,
     instructions_count: u64,
-    limit: u64,
-    coverage: Vec<(u64, Option<Context>)>,
-    save_context: bool,
+    // limit: u64,
+    // coverage: Vec<(u64, Option<Context>)>,
+    // save_context: bool,
     dirty: BTreeSet<u64>,
-    seen: BTreeSet<u64>,
+    // seen: BTreeSet<u64>,
     breakpoints: BTreeSet<u64>,
-    status: EmulationStatus,
-    mem_access: Vec<(u64, u64, usize, String)>,
-    queue: Vec<(*mut std::ffi::c_void, u64, Option<Context>)>
+    // status: EmulationStatus,
+    // mem_access: Vec<(u64, u64, u64, usize, String)>,
+    queue: Vec<(*mut std::ffi::c_void, u64, Option<Context>)>,
+    // immediates: Vec<u64>,
+    params: &'a Params,
+    trace: &'a mut Trace,
 }
 
-impl hook::Hooks for BochsHooks {
+impl <'a> hook::Hooks for BochsHooks <'a>{
     // fn reset(&mut self, _id: u32, _ty: ResetSource) {}
     // fn hlt(&mut self, _id: u32) {}
     // fn mwait(&mut self, _id: u32, _addr: PhyAddress, _len: usize, _flags: u32) {}
@@ -82,9 +85,39 @@ impl hook::Hooks for BochsHooks {
     //     trace!("far branch taken {:?} {:x} {:x}", _what, _branch_pc.1, _new_pc.1);
     // }
 
-    // fn opcode( &mut self, _id: u32, _ins: *const std::ffi::c_void, _opcode: &[u8], _is_32: bool, _is_64: bool,) {
-    //     trace!("opcode {:x?}", _opcode);
-    // }
+    fn opcode( &mut self, _id: u32, ins: *const std::ffi::c_void, _opcode: &[u8], _is_32: bool, _is_64: bool,) {
+        trace!("opcode {:x?}", _opcode);
+        use bochscpu::opcode;
+        let op = unsafe { opcode::instr_bx_opcode(ins) };
+
+        const BX_IA_CMP_RAXID: u32 = 0x491;
+        const BX_IA_CMP_EQSIB: u32 = 0x4a3;
+        const BX_IA_CMP_EQID: u32 = 0x49a;
+        const BX_IA_CMP_EAXID: u32 = 0x38;
+        const BX_IA_CMP_EDID: u32 = 0x61;
+        const BX_IA_CMP_EDSIB: u32 = 0x6a;
+        const BX_IA_CMP_AXIW: u32 = 0x2f;
+        const BX_IA_CMP_EWIW: u32 = 0x4f;
+        const BX_IA_CMP_EWSIB: u32 = 0x58;
+
+        match op {
+            BX_IA_CMP_RAXID | BX_IA_CMP_EQID | BX_IA_CMP_EQSIB => {
+                let immediate = unsafe { opcode::instr_imm64(ins) };
+                self.trace.immediates.insert(immediate);
+            }
+            BX_IA_CMP_EAXID | BX_IA_CMP_EDID | BX_IA_CMP_EDSIB => {
+                let immediate = unsafe { opcode::instr_imm32(ins) };
+                self.trace.immediates.insert(immediate as u64);
+            }
+            BX_IA_CMP_AXIW | BX_IA_CMP_EWIW | BX_IA_CMP_EWSIB => {
+                let immediate = unsafe { opcode::instr_imm16(ins) };
+                self.trace.immediates.insert(immediate as u64);
+            }
+            _ => {
+                // println!("unknown opcode {:x}", op);
+            }
+        }
+    }
 
     // fn interrupt(&mut self, cpu_id: u32, vector: u32) {
     //     info!("interrupt {:?}", vector);
@@ -105,10 +138,9 @@ impl hook::Hooks for BochsHooks {
         // trace!("before {:?}", _ins);
         let cpu = Cpu::from(cpu_id);
         let rip = unsafe { cpu.rip() };
-        self.seen.insert(rip);
 
         // sometime before execution is called twice, making traces completly false ...
-        if self.save_context {
+        if self.params.save_context {
             let context: LocalContext = unsafe { cpu.state().into() };
             let context = context.0;
             self.queue.push((ins, rip, Some(context)));
@@ -116,28 +148,44 @@ impl hook::Hooks for BochsHooks {
             self.queue.push((ins, rip, None));
         }
 
-        if rip == self.return_address {
+        if rip == self.params.return_address {
             trace!("found return address");
+            self.trace.status = EmulationStatus::Success;
             unsafe { cpu.set_run_state(RunState::Stop) };
         }
 
-        if !self.singlestep {
-            for &v in self.breakpoints.iter() {
-                if v == rip {
-                    self.status = EmulationStatus::Breakpoint;
-                    unsafe { cpu.set_run_state(RunState::Stop) };
-                }
-            }
-        }
-
-        for (k, &v) in self.excluded_addresses.iter() {
+        for (k, &v) in self.params.excluded_addresses.iter() {
             if v == rip {
-                info!("found excluded address {}", k);
-                self.status = EmulationStatus::ForbiddenAddress;
+                let msg = format!("found excluded address {}", k);
+                self.trace.status = EmulationStatus::ForbiddenAddress(msg);
                 unsafe { cpu.set_run_state(RunState::Stop) };
             }
         }
 
+        self.trace.seen.insert(rip);
+        // if rip == 0xfffff8024b48fe2f {
+        //     println!("skipping CfgReg_SaveRoot");
+        //     unsafe {
+        //         cpu.set_rax(0);
+        //         cpu.set_rip(rip + 5);
+        //     }
+        // }
+
+        // if rip == 0xfffff8024b48fe46 {
+        //     println!("skipping CfgReg_Refresh");
+        //     unsafe {
+        //         cpu.set_rip(rip + 5);
+        //     }
+        // }
+
+        if !self.singlestep {
+            for &v in self.breakpoints.iter() {
+                if v == rip {
+                    self.trace.status = EmulationStatus::Breakpoint;
+                    unsafe { cpu.set_run_state(RunState::Stop) };
+                }
+            }
+        }
     }
 
     fn after_execution(&mut self, cpu_id: u32, ins: *mut std::ffi::c_void) {
@@ -145,7 +193,7 @@ impl hook::Hooks for BochsHooks {
 
         if let Some((a, b, c)) = self.queue.pop() {
             if a == ins {
-                self.coverage.push((b, c));
+                self.trace.coverage.push((b, c));
                 self.instructions_count += 1;
             }
         }
@@ -153,12 +201,12 @@ impl hook::Hooks for BochsHooks {
         let cpu = Cpu::from(cpu_id);
 
         if self.singlestep {
-            self.status = EmulationStatus::SingleStep;
+            self.trace.status = EmulationStatus::SingleStep;
             unsafe { cpu.set_run_state(RunState::Stop) };
         }
-        if self.limit != 0 && self.instructions_count > self.limit {
+        if self.params.limit != 0 && self.instructions_count > self.params.limit {
             warn!("limit exceeded");
-            self.status = EmulationStatus::LimitExceeded;
+            self.trace.status = EmulationStatus::LimitExceeded;
             unsafe { cpu.set_run_state(RunState::Stop) };
         }
     }
@@ -179,14 +227,14 @@ impl hook::Hooks for BochsHooks {
     // fn inp2(&mut self, _addr: u16, _len: usize, _val: u32) {}
     // fn outp(&mut self, _addr: u16, _len: usize, _val: u32) {}
 
-    fn lin_access(&mut self, _cpu_id: u32, vaddr: bochscpu::Address, gpa: bochscpu::Address, len: usize, _memty: hook::MemType, rw: hook::MemAccess) {
-        // let cpu = Cpu::from(cpu_id);
-        // let cr3 = unsafe { cpu.cr3() };
+    fn lin_access(&mut self, cpu_id: u32, vaddr: bochscpu::Address, gpa: bochscpu::Address, len: usize, _memty: hook::MemType, rw: hook::MemAccess) {
+        let cpu = Cpu::from(cpu_id);
+        let rip = unsafe { cpu.rip() };
 
         // FIXME: push type
         // FIXME: need to push rip
-        let access = String::from("TODO");
-        self.mem_access.push((vaddr, gpa, len, access));
+        let access = format!("{:?}", rw);
+        self.trace.mem_access.push((rip, vaddr, gpa, len, access));
         match rw {
             hook::MemAccess::Write | hook::MemAccess::RW => {
                 self.dirty.insert(gpa & !0xfff);
@@ -209,32 +257,34 @@ impl hook::Hooks for BochsHooks {
     // fn vmexit(&mut self, _id: u32, _reason: u32, _qualification: u64) {}
 }
 
-impl BochsHooks {
+impl <'a> BochsHooks <'a> {
 
-    fn new(return_address: u64, limit: u64) -> Self {
+    fn new(params: &'a Params, trace: &'a mut Trace) -> Self {
         Self {
             singlestep: false,
-            excluded_addresses: HashMap::new(),
-            return_address: return_address,
+            // excluded_addresses: HashMap::new(),
+            // return_address: return_address,
             instructions_count: 0,
-            limit: limit,
-            coverage: Vec::new(),
+            // limit: limit,
+            // coverage: Vec::new(),
             dirty: BTreeSet::new(),
-            seen: BTreeSet::new(),
+            // seen: BTreeSet::new(),
             breakpoints: BTreeSet::new(),
-            save_context: false,
-            status: EmulationStatus::Success,
-            mem_access: Vec::new(),
-            queue: Vec::new()
+            // save_context: false,
+            // status: EmulationStatus::Success,
+            queue: Vec::new(),
+            params,
+            trace,
         }
     }
 
 }
 
+
 pub struct BochsTracer <S: 'static + Snapshot> {
-    snapshot: &'static S,
-    breakpoints: BTreeSet<u64>,
-    dirty: BTreeSet<u64>
+    pub snapshot: &'static S,
+    pub breakpoints: BTreeSet<u64>,
+    dirty: BTreeSet<u64>,
 
 }
 
@@ -244,6 +294,7 @@ impl <S: 'static + Snapshot> BochsTracer <S> {
 
         unsafe { Cpu::new(0) };
 
+        // FIXME: use drop to remove leak
         let static_ref: &'static S = Box::leak(Box::new(snapshot));
         let tracer = BochsTracer {
             snapshot: static_ref,
@@ -284,9 +335,15 @@ impl <S: 'static + Snapshot> BochsTracer <S> {
 
     }
 
-    pub fn get_state(&self) -> Result<InitialContext> {
+
+
+}
+
+impl <S: Snapshot> Tracer for BochsTracer <S> {
+
+    fn get_state(&mut self) -> Result<ProcessorState> {
         let c = Cpu::from(0);
-        let mut state = InitialContext::default();
+        let mut state = ProcessorState::default();
 
         unsafe {
             state.rip = c.rip();
@@ -356,63 +413,7 @@ impl <S: 'static + Snapshot> BochsTracer <S> {
 
     }
 
-    pub fn singlestep(&mut self, params: &Params) -> Result<Trace> {
-
-        let c = Cpu::from(0);
-        let start = Instant::now();
-
-        let mut hooks: BochsHooks = params.into();
-        hooks.singlestep = true;
-        hooks.breakpoints.extend(&self.breakpoints);
- 
-        unsafe { c.prepare().register(&mut hooks).run() };
-
-        trace!("executed {} instructions ({}) in {:?}", hooks.instructions_count, hooks.coverage.len(), start.elapsed());
-        trace!("seen {} unique addresses, dirty pages {}", hooks.seen.len(), hooks.dirty.len());
-
-        let trace: Trace = hooks.into();
-
-        Ok(trace)
-
-    }
-
-    pub fn add_breakpoint(&mut self, address: u64) -> () {
-        self.breakpoints.insert(address);
-
-    }
-
-
-}
-
-impl From<BochsHooks> for Trace {
-
-    fn from(hooks: BochsHooks) -> Self {
-        let mut trace = Trace::new();
-        trace.coverage = hooks.coverage;
-        trace.status = hooks.status;
-        trace.mem_access = hooks.mem_access;
-        trace.seen = hooks.seen;
-        trace
-    }
-
-}
-
-
-impl From<&Params> for BochsHooks {
-
-    fn from(params: &Params) -> Self {
-        let mut hooks = BochsHooks::new(params.return_address, params.limit);
-        hooks.save_context = params.save_context;
-        hooks.excluded_addresses = params.excluded_addresses.clone();
-        hooks
-    }
-
-}
-
-
-impl <S: Snapshot> Tracer for BochsTracer <S> {
-
-    fn set_initial_context(&mut self, context: &InitialContext) -> Result<()> {
+    fn set_state(&mut self, context: &ProcessorState) -> Result<()> {
         let c = Cpu::from(0);
 
         let gdt = GlobalSeg {
@@ -529,32 +530,45 @@ impl <S: Snapshot> Tracer for BochsTracer <S> {
 
     }
 
-    fn run(&mut self, params: &Params) -> Result<Trace> {
+    fn run<H: trace::Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace> {
 
         let c = Cpu::from(0);
         let start = Instant::now();
 
-        // ctrlc::set_handler(move || {
-        //     warn!("killed by ctrl-c");
-        //     let cpu = Cpu::from(0);
-        //     unsafe { cpu.set_run_state(RunState::Stop) };
-        // }).expect("Error setting Ctrl-C handler");
+        let mut trace = Trace::new();
+        let mut hooks = BochsHooks::new(params, &mut trace);
 
-        let mut hooks: BochsHooks = params.into();
-        hooks.breakpoints.extend(&self.breakpoints);
+        let run = unsafe { c.prepare().register(&mut hooks) };
+        hook.setup(self);
 
-        unsafe { c.prepare().register(&mut hooks).run() };
+        loop {
+
+            hooks.breakpoints.extend(self.breakpoints.iter());
+            unsafe { run.run() };
+            match hooks.trace.status {
+                EmulationStatus::Breakpoint => {
+                    hook.handle_breakpoint(self)?;
+                    hooks.singlestep = true;
+
+                },
+                EmulationStatus::SingleStep => {
+                    hooks.singlestep = false;
+                },
+                _ => {
+                    break
+                }
+            }
+        }   
+
+        hook.handle_trace(hooks.trace)?;
 
         let end = Instant::now();
-        trace!("executed {} instructions ({}) in {:?}", hooks.instructions_count, hooks.coverage.len(), start.elapsed());
-        trace!("seen {} unique addresses, dirty pages {}", hooks.seen.len(), hooks.dirty.len());
 
         self.dirty.append(&mut hooks.dirty);
-        let mut trace: Trace = hooks.into();
         trace.start = Some(start);
         trace.end = Some(end);
 
-        // FIXME: boarf to improve ...
+        // FIXME: false, need a way to have only new pages, boarf to improve ...
         trace.code = unsafe { guest_mem::mem().len() };
 
         Ok(trace)
@@ -578,6 +592,7 @@ impl <S: Snapshot> Tracer for BochsTracer <S> {
                     };
                 },
                 None => {
+                    error!("dirty page not in guest mem, should not happen");
 
                 }
             };
@@ -604,5 +619,41 @@ impl <S: Snapshot> Tracer for BochsTracer <S> {
         Ok(unsafe { c.cr3() })
     }
 
+    fn singlestep<H: trace::Hook>(&mut self, params: &Params, _hook: &mut H) -> Result<Trace> {
+        let c = Cpu::from(0);
+        // let start = Instant::now();
+
+        let mut trace: Trace = Trace::new();
+        let mut hooks = BochsHooks::new(params, &mut trace);
+        hooks.singlestep = true;
+        hooks.breakpoints.extend(self.breakpoints.iter());
+ 
+        unsafe { c.prepare().register(&mut hooks).run() };
+
+        // trace!("executed {} instructions ({}) in {:?}", hooks.instructions_count, hooks.coverage.len(), start.elapsed());
+        // trace!("seen {} unique addresses, dirty pages {}", hooks.seen.len(), hooks.dirty.len());
+
+        Ok(trace)
+
+    }
+
+    fn add_breakpoint(&mut self, address: u64) {
+        self.breakpoints.insert(address);
+
+    }
+
 }
 
+impl <S: Snapshot> mem::X64VirtualAddressSpace for BochsTracer <S> {
+
+    fn read_gpa(&self, address: u64, data: &mut[u8]) -> Result<()> {
+        guest_mem::phy_read_slice(address, data);
+        Ok(())
+    }
+
+    fn write_gpa(&mut self, address: u64, data: &[u8]) -> Result<()> {
+        guest_mem::phy_write(address, data);
+        Ok(())
+    }
+
+}
