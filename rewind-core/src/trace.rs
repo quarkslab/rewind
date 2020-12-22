@@ -10,7 +10,6 @@ use std::time::{Instant, Duration};
 use anyhow::Result;
 
 use serde::{Serialize, Deserialize, Deserializer, de::Error};
-use serde_json;
 
 
 #[derive(Serialize, Deserialize, CustomDebug, Default)]
@@ -68,6 +67,35 @@ pub struct ProcessorState {
     pub apic_base: u64
 }
 
+impl ProcessorState {
+
+    pub fn save<P>(&self, path: P) -> Result<()>
+    where P: AsRef<std::path::Path>
+    {
+        let mut fp = BufWriter::new(std::fs::File::create(&path)?);
+        let data = serde_json::to_vec_pretty(&self)?;
+        fp.write_all(&data)?;
+        Ok(())
+    }
+
+    pub fn load<P>(path: P) -> Result<Self>
+    where P: AsRef<std::path::Path>
+    {
+        let input_str = std::fs::read_to_string(&path)?;
+        let input = serde_json::from_str(&input_str)?;
+        Ok(input)
+    }
+
+}
+
+impl FromStr for ProcessorState {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<ProcessorState> {
+        let context = serde_json::from_str(s)?;
+        Ok(context)
+    }
+}
 
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub enum CoverageMode {
@@ -101,7 +129,7 @@ impl FromStr for CoverageMode {
 }
 
 
-#[derive(Default, Serialize, Deserialize, CustomDebug, Clone)]
+#[derive(Default, Serialize, Deserialize, CustomDebug)]
 pub struct Params {
     #[serde(skip)]
     pub limit: u64,
@@ -117,29 +145,40 @@ pub struct Params {
     pub save_instructions: bool,
 }
 
-impl FromStr for ProcessorState {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<ProcessorState> {
-        let context = serde_json::from_str(s)?;
-        Ok(context)
+impl Params {
+    pub fn save<P>(&self, path: P) -> Result<()>
+    where P: AsRef<std::path::Path>
+    {
+        let mut fp = BufWriter::new(std::fs::File::create(&path)?);
+        let data = serde_json::to_vec_pretty(&self)?;
+        fp.write_all(&data)?;
+        Ok(())
     }
+
+    pub fn load<P>(path: P) -> Result<Self>
+    where P: AsRef<std::path::Path>
+    {
+        let input_str = std::fs::read_to_string(&path)?;
+        let input = serde_json::from_str(&input_str)?;
+        Ok(input)
+    }
+
 }
 
-// FIXME: from string?
-// pub fn parse_context(content: &str) -> Result<InitialContext> {
-// }
+impl FromStr for Params {
+    type Err = anyhow::Error;
 
-pub fn parse_params(content: &str) -> Result<Params> {
-    let context = serde_json::from_str(content)?;
-    Ok(context)
+    fn from_str(s: &str) -> Result<Self> {
+        let params = serde_json::from_str(s)?;
+        Ok(params)
+    }
 }
 
 #[derive(Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum EmulationStatus {
     Success,
-    Error,
-    ForbiddenAddress,
+    Error(String),
+    ForbiddenAddress(String),
     Timeout,
     LimitExceeded,
     UnHandledException,
@@ -151,8 +190,8 @@ impl std::fmt::Display for EmulationStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             EmulationStatus::Success => write!(f, "Success"),
-            EmulationStatus::Error => write!(f, "Error"),
-            EmulationStatus::ForbiddenAddress => write!(f, "ForbiddenAddress"),
+            EmulationStatus::Error(e) => write!(f, "Error: {}", e),
+            EmulationStatus::ForbiddenAddress(e) => write!(f, "ForbiddenAddress: {}", e),
             EmulationStatus::Timeout => write!(f, "Timeout"),
             EmulationStatus::LimitExceeded => write!(f, "LimitExceeded"),
             EmulationStatus::UnHandledException => write!(f, "UnhandledException"),
@@ -191,10 +230,10 @@ pub struct Trace {
     #[serde(skip)]
     pub end: Option<Instant>,
     pub coverage: Vec<(u64, Option<Context>)>,
-    pub instrs: Vec<String>,
+    pub immediates: BTreeSet<u64>,
     pub status: EmulationStatus,
     pub seen: BTreeSet<u64>,
-    pub mem_access: Vec<(u64, u64, usize, String)>,
+    pub mem_access: Vec<(u64, u64, u64, usize, String)>,
     pub code: usize,
     pub data: usize,
 }
@@ -206,7 +245,7 @@ impl Trace {
             start: None,
             end: None,
             coverage: Vec::new(),
-            instrs: Vec::new(),
+            immediates: BTreeSet::new(),
             seen: BTreeSet::new(),
             status: EmulationStatus::Success,
             mem_access: Vec::new(),
@@ -215,12 +254,23 @@ impl Trace {
         }
     }
 
-    pub fn save(&self, path: &str) -> Result<()> {
-        let mut fp = BufWriter::new(std::fs::File::create(path)?);
+    pub fn save<P>(&self, path: P) -> Result<()>
+    where P: AsRef<std::path::Path>
+    {
+        let mut fp = BufWriter::new(std::fs::File::create(&path)?);
         let data = serde_json::to_vec_pretty(&self)?;
         fp.write_all(&data)?;
         Ok(())
     }
+
+    pub fn load<P>(path: P) -> Result<Self>
+    where P: AsRef<std::path::Path>
+    {
+        let input_str = std::fs::read_to_string(&path)?;
+        let input = serde_json::from_str(&input_str)?;
+        Ok(input)
+    }
+
 }
 
 impl FromStr for Trace {
@@ -269,6 +319,27 @@ pub struct Input {
     pub size: HexNumber,
 }
 
+impl Input {
+
+    pub fn save<P>(&self, path: P) -> Result<()>
+    where P: AsRef<std::path::Path>
+    {
+        let mut fp = BufWriter::new(std::fs::File::create(&path)?);
+        let data = serde_json::to_vec_pretty(&self)?;
+        fp.write_all(&data)?;
+        Ok(())
+    }
+
+    pub fn load<P>(path: P) -> Result<Self>
+    where P: AsRef<std::path::Path>
+    {
+        let input_str = std::fs::read_to_string(&path)?;
+        let input = serde_json::from_str(&input_str)?;
+        Ok(input)
+    }
+
+}
+
 impl FromStr for Input {
     type Err = anyhow::Error;
 
@@ -280,9 +351,11 @@ impl FromStr for Input {
 
 pub trait Tracer {
 
-    fn set_initial_context(&mut self, context: &ProcessorState) -> Result<()>;
+    fn get_state(&mut self) -> Result<ProcessorState>;
 
-    fn run(&mut self, params: &Params) -> Result<Trace>;
+    fn set_state(&mut self, state: &ProcessorState) -> Result<()>;
+
+    fn run<H: Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace>;
 
     fn restore_snapshot(&mut self) -> Result<usize>;
 
@@ -292,5 +365,55 @@ pub trait Tracer {
 
     fn cr3(&mut self) -> Result<u64>;
 
+    fn singlestep<H: Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace>;
+
+    fn add_breakpoint(&mut self, address: u64);
+
 }
+
+// impl Tracer for Box<dyn Tracer> {
+
+//     fn get_state(&mut self) -> Result<ProcessorState> {
+//         self.as_mut().get_state()
+//     }
+
+//     fn set_state(&mut self, state: &ProcessorState) -> Result<()> {
+//         self.as_mut().set_state(state)
+//     }
+
+//     fn run(&mut self, params: &Params, hook: &mut Hook) -> Result<Trace> {
+//         self.as_mut().run(params, hook)
+//     }
+
+//     fn restore_snapshot(&mut self) -> Result<usize> {
+//         self.as_mut().restore_snapshot()
+//     }
+
+//     fn read_gva(&mut self, cr3: u64, vaddr: u64, data: &mut [u8]) -> Result<()> {
+//         self.as_mut().read_gva(cr3, vaddr, data)
+//     }
+
+//     fn write_gva(&mut self, cr3: u64, vaddr: u64, data: &[u8]) -> Result<()> {
+//         self.as_mut().write_gva(cr3, vaddr, data)
+//     }
+
+//     fn cr3(&mut self) -> Result<u64> {
+//         self.as_mut().cr3()
+//     }
+
+//     fn singlestep(&mut self, params: &Params) -> Result<Trace> {
+//         self.as_mut().singlestep(params)
+//     }
+
+// }
+
+pub trait Hook: Default {
+    fn setup<T: Tracer>(&self, tracer: &mut T);
+
+    fn handle_breakpoint<T: Tracer>(&mut self, tracer: &mut T) -> Result<bool>;
+
+    fn handle_trace(&self, trace: &mut Trace) -> Result<bool>;
+
+}
+
 

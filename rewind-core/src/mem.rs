@@ -3,7 +3,7 @@ use std::fmt;
 use std::iter;
 use std::mem;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeSet};
 use std::hash::BuildHasherDefault;
 
 use fnv::FnvHasher;
@@ -28,11 +28,11 @@ const fn pdpt_index(gva: Gva) -> u64 {
 }
 
 const fn pd_index(gva: Gva) -> u64 {
-    gva >> (12 + (9 * 1)) & 0x1ff
+    (gva >> 21) & 0x1ff
 }
 
 const fn pt_index(gva: Gva) -> u64 {
-    gva >> (12 + (9 * 0)) & 0x1ff
+    (gva >> 12) & 0x1ff
 }
 
 const fn base_flags(gpa: Gpa) -> (Gpa, u64) {
@@ -166,7 +166,7 @@ pub trait X64VirtualAddressSpace {
         Ok(pte_paddr + page_offset(gva))
     }
 
-    fn translate_gva_range(&self, cr3: Gpa, gva: Gva) -> Result<(Gpa, usize)> {
+    fn _translate_gva_range(&self, cr3: Gpa, gva: Gva) -> Result<(Gpa, usize)> {
         let (pml4_base, _) = base_flags(cr3);
 
         let pml4e_addr = pml4_base + pml4_index(gva) * 8;
@@ -225,6 +225,179 @@ pub trait X64VirtualAddressSpace {
 
         Ok((pte_paddr, 0x1000))
     }
+
+    fn translate_gva_with_pages(&self, cr3: Gpa, gva: Gva) -> Result<TranslatedAddress> {
+        let (pml4_base, _) = base_flags(cr3);
+
+        let pml4e_addr = pml4_base + pml4_index(gva) * 8;
+        let pml4e = self.read_gpa_u64(pml4e_addr)?;
+
+        let (pdpt_base, pml4e_flags) = base_flags(pml4e);
+
+        if pml4e_flags & 1 == 0 {
+            return Ok(TranslatedAddress {
+                pml4: Some(pml4_base),
+                pdpt: None,
+                pd: None,
+                pt: None,
+                gpa: None,
+                size: None,
+            })
+        }
+
+        let pdpte_addr = pdpt_base + pdpt_index(gva) * 8;
+        let pdpte = self.read_gpa_u64(pdpte_addr)?;
+
+        let (pd_base, pdpte_flags) = base_flags(pdpte);
+
+        if pdpte_flags & 1 == 0 {
+            return Ok(TranslatedAddress {
+                pml4: Some(pml4_base),
+                pdpt: Some(pdpt_base),
+                pd: None,
+                pt: None,
+                gpa: None,
+                size: None,
+            })
+        }
+
+        // huge pages:
+        // 7 (PS) - Page size; must be 1 (otherwise, this entry references a page
+        // directory; see Table 4-1
+        if pdpte_flags & (1 << 7) != 0 {
+            // let res = (pdpte & 0xffff_ffff_c000_0000) + (gva & 0x3fff_ffff);
+            let gpa = pd_base + (gva & 0x3fff_ffff);
+            return Ok(TranslatedAddress {
+                pml4: Some(pml4_base),
+                pdpt: Some(pdpt_base),
+                pd: None,
+                pt: None,
+                gpa: Some(gpa),
+                size: Some(GpaSize::Size1G),
+            })
+        }
+
+        let pde_addr = pd_base + pd_index(gva) * 8;
+        let pde = self.read_gpa_u64(pde_addr)?;
+
+        let (pt_base, pde_flags) = base_flags(pde);
+
+        if pde_flags & 1 == 0 {
+            return Ok(TranslatedAddress {
+                pml4: Some(pml4_base),
+                pdpt: Some(pdpt_base),
+                pd: Some(pd_base),
+                pt: None,
+                gpa: None,
+                size: None,
+            })
+        }
+
+        // large pages:
+        // 7 (PS) - Page size; must be 1 (otherwise, this entry references a page
+        // table; see Table 4-18
+        if pde_flags & (1 << 7) != 0 {
+            // let res = (pde & 0xffff_ffff_ffe0_0000) + (gva & 0x1f_ffff);
+            let gpa = pt_base + (gva & 0x1f_ffff);
+            return Ok(TranslatedAddress {
+                pml4: Some(pml4_base),
+                pdpt: Some(pdpt_base),
+                pd: Some(pd_base),
+                pt: None,
+                gpa: Some(gpa),
+                size: Some(GpaSize::Size2M),
+            })
+        }
+
+        let pte_addr = pt_base + pt_index(gva) * 8;
+        let pte = self.read_gpa_u64(pte_addr)?;
+
+        let (pte_paddr, pte_flags) = pte_flags(pte);
+
+        if pte_flags & 1 == 0 {
+            return Ok(TranslatedAddress {
+                pml4: Some(pml4_base),
+                pdpt: Some(pdpt_base),
+                pd: Some(pd_base),
+                pt: Some(pt_base),
+                gpa: None,
+                size: None,
+            })
+        }
+
+        let gpa = pte_paddr + page_offset(gva);
+        Ok(TranslatedAddress {
+                pml4: Some(pml4_base),
+                pdpt: Some(pdpt_base),
+                pd: Some(pd_base),
+                pt: Some(pt_base),
+                gpa: Some(gpa),
+                size: Some(GpaSize::Size4K),
+            })
+    }
+
+    fn translate_gva_range(&self, cr3: Gpa, gva: Gva, size: usize) -> Result<BTreeSet<Gpa>> {
+
+        let mut pages = BTreeSet::new();
+        for (base, _) in chunked(gva, size) {
+            let translated = self.translate_gva_with_pages(cr3, base)?;
+            let needed_pages = translated.needed_pages();
+            pages.extend(needed_pages.iter());
+        }
+
+        Ok(pages)
+
+    }
+}
+
+pub enum GpaSize {
+    Size4K,
+    Size2M,
+    Size1G,
+}
+
+pub struct TranslatedAddress {
+    pml4: Option<Gpa>,
+    pdpt: Option<Gpa>,
+    pd: Option<Gpa>,
+    pt: Option<Gpa>,
+    gpa: Option<Gpa>,
+    size: Option<GpaSize>,
+}
+
+
+impl TranslatedAddress {
+
+    pub fn is_valid(&self) -> bool {
+        self.gpa.is_some()
+    }
+
+    pub fn needed_pages(&self) -> Vec<Gpa> {
+        let mut pages = vec![];
+        if let Some(gpa) = self.pml4 {
+            pages.push(gpa);
+        }
+
+        if let Some(gpa) = self.pdpt {
+            pages.push(gpa);
+        }
+
+        if let Some(gpa) = self.pd {
+            pages.push(gpa);
+        }
+
+        if let Some(gpa) = self.pt {
+            pages.push(gpa);
+        }
+
+        if let Some(gpa) = self.gpa {
+            pages.push(gpa & !0xfff);
+        }
+
+        pages
+    }
+
+
 }
 
 pub struct Allocator {
@@ -333,7 +506,7 @@ impl Error for VirtMemError {
     }
 }
 
-fn chunked(start: Gva, sz: usize) -> impl Iterator<Item = (Gva, usize)> {
+pub fn chunked(start: Gva, sz: usize) -> impl Iterator<Item = (Gva, usize)> {
     debug_assert!(start.checked_add(sz as u64).is_some());
 
     let mut remaining = sz;
