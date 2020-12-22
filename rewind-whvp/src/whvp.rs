@@ -1189,11 +1189,12 @@ impl Partition {
 
 impl mem::X64VirtualAddressSpace for Partition {
     fn read_gpa(&self, gpa: mem::Gpa, buf: &mut [u8]) -> anyhow::Result<()> {
-        let (base, _off) = mem::page_off(gpa);
+        let (_base, _off) = mem::page_off(gpa);
         let data = self.read_physical_memory(gpa as usize, buf.len());
         match data {
             Ok(arr) => return Ok(buf.copy_from_slice(&arr[..buf.len()])),
-            _ => return Err(anyhow!(mem::VirtMemError::MissingPage(base))),
+            Err(e) => return Err(anyhow!("{:?}: {:x} {:x}", e, gpa, buf.len()))
+            // mem::VirtMemError::MissingPage(base))),
         }
     }
 
