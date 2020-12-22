@@ -17,8 +17,5 @@ anyhow = "1.0.28"
 rewind-core = { path = "../rewind-core" }
 rewind-snapshot = { path = "../rewind-snapshot" }
 rewind-cli = { path = "../rewind-cli" }
-pdb = "0.6.0"
-deku = "0.9.1"
-reqwest = { version = "0.10.9", features = ["blocking"] }
-thiserror = "1.0.22"
+rewind-system = { path = "../rewind-system" }
 

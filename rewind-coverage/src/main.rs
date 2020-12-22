@@ -7,10 +7,10 @@ use simple_logger;
 use rewind_core::trace;
 use rewind_cli::helpers;
 
-use rewind_snapshot as snapshot;
+use rewind_system::system;
+use rewind_system::pdbstore;
 
-#[macro_use]
-extern crate anyhow;
+use rewind_snapshot as snapshot;
 
 use custom_debug::Debug;
 
@@ -34,10 +34,6 @@ pub struct Cli {
 
 
 }
-
-mod system;
-mod pe;
-mod pdbstore;
 
 fn main() -> Result<()> {
     let args = Cli::parse();
@@ -101,6 +97,7 @@ fn main() -> Result<()> {
             Some(module) => {
                 *modules.entry(&module.name).or_insert_with(|| {
 
+                    // FIXME: need a fn in system.rs
                     match system.get_file_information(module) {
                         Ok(info) => {
                             match store.download_pe(&module.name, &info) {
