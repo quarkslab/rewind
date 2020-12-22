@@ -4,12 +4,6 @@ version = "0.1.0"
 authors = ["Damien Aumaitre <daumaitre@quarkslab.com>"]
 edition = "2018"
 
-[features]
-default = []
-
-bochs = ["rewind-bochs"]
-whvp = ["rewind-whvp"]
-
 [dependencies]
 clap = { git = "https://github.com/clap-rs/clap/" }
 serde_json = "1.0.51"
@@ -21,6 +15,4 @@ anyhow = "1.0.28"
 rewind-core = { path = "../rewind-core" }
 rewind-snapshot = { path = "../rewind-snapshot" }
 rewind-cli = { path = "../rewind-cli" }
-rewind-bochs = { path = "../rewind-bochs", optional = true }
-rewind-whvp = { path = "../rewind-whvp", optional = true }
 

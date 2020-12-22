@@ -19,17 +19,14 @@ pub struct Cli {
     #[clap(long="save-context")]
     pub save_context: bool,
 
-    #[clap(long="save-instructions")]
-    pub save_instructions: bool,
-
     #[clap(long="max-time", default_value="0")]
     pub max_time: u64,
 
     #[clap(long="save-trace", parse(from_os_str))]
     pub trace: Option<std::path::PathBuf>,
 
-    #[clap(long="emulator", possible_values(&["whvp", "bochs"]), default_value="bochs")]
-    pub emulator: rewind_cli::EmulatorType,
+    #[clap(long="backend", possible_values(&["whvp", "bochs"]), default_value="bochs")]
+    pub backend: rewind_cli::BackendType,
 
     #[clap(long="coverage", possible_values(&["no", "instrs", "hit"]), default_value="no")]
     pub coverage: rewind_core::trace::CoverageMode,
