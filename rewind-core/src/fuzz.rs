@@ -1,5 +1,4 @@
 
-use std::convert::TryInto;
 use std::time::Duration;
 use std::str::FromStr;
 
@@ -10,7 +9,6 @@ use std::sync::mpsc;
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 
 use std::ffi::OsStr;
@@ -23,29 +21,23 @@ use serde::{Serialize, Deserialize};
 
 use chrono::{Utc, DateTime};
 
-use anyhow::Result;
-
-// use ni_rs;
+// use anyhow::Result;
+use thiserror::Error;
 
 use crate::trace;
 use crate::watch;
+use crate::error;
 
 use crate::helpers::convert;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct Stats {
     pub iterations: u64,
-    // pub total_iterations: u64,
     pub coverage: u64,
-    // pub total_coverage: u64,
-    pub code: usize,
-    pub data: usize,
+    pub mapped_pages: usize,
     pub start: DateTime<Utc>,
     pub updated: DateTime<Utc>,
-    // pub total_start: Instant,
-    // interval: Duration,
     pub corpus_size: usize,
-    pub worklist_size: usize,
     pub crashes: u64,
     pub uuid: uuid::Uuid,
 }
@@ -56,48 +48,14 @@ impl Stats {
         let uuid = uuid::Uuid::new_v4();
         Stats {
             iterations: 0,
-            // total_iterations: 0,
             coverage: 0,
-            // total_coverage: 0,
-            code: 0,
-            data: 0,
-            start: start,
+            mapped_pages: 0,
+            start,
             updated: start,
-            // total_start: start,
-            // interval: interval,
             corpus_size: 0,
-            worklist_size: 0,
             crashes: 0,
             uuid,
         }
-    }
-
-    // pub fn reset(&mut self) {
-    //     self.iterations = 0;
-    //     self.coverage = 0;
-    //     self.start = Instant::now()
-    // }
-
-    // pub fn update_display(&mut self) -> Option<String> {
-    //     if self.start.elapsed() > self.interval {
-    //         Some(self.display())
-    //     } else {
-    //         None
-    //     }
-    // }
-
-    pub fn display(&mut self) -> String {
-        let elapsed = self.updated - self.start;
-        let msg = format!("{} executions, {} exec/s, coverage {}, code {}, data {}, corpus {}, worklist {}, crashes {}",
-            self.iterations,
-            self.iterations / elapsed.num_seconds() as u64,
-            self.coverage,
-            convert((self.code * 0x1000) as f64),
-            convert((self.data * 0x1000) as f64),
-            self.corpus_size,
-            self.worklist_size,
-            self.crashes);
-        msg
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -110,7 +68,7 @@ impl Stats {
         elapsed.to_std().unwrap()
     }
 
-    pub fn save<P>(&self, path: P) -> Result<()>
+    pub fn save<P>(&self, path: P) -> Result<(), error::GenericError>
     where P: AsRef<std::path::Path> {
         let mut fp = BufWriter::new(std::fs::File::create(&path)?);
         let data = serde_json::to_vec_pretty(&self)?;
@@ -118,7 +76,7 @@ impl Stats {
         Ok(())
     }
 
-    pub fn load<P>(path: P) -> Result<Self>
+    pub fn load<P>(path: P) -> Result<Self, error::GenericError>
     where P: AsRef<std::path::Path>
     {
         let input_str = std::fs::read_to_string(&path)?;
@@ -126,6 +84,27 @@ impl Stats {
         Ok(input)
     }
 
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for Stats {
+
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let elapsed = Utc::now() - self.start;
+        write!(f, "{:?}, {} executions, {} exec/s, coverage {}, mapped pages {}, corpus {}, crashes {}",
+            elapsed,
+            self.iterations,
+            self.iterations / elapsed.num_seconds() as u64,
+            self.coverage,
+            convert((self.mapped_pages * 0x1000) as f64),
+            self.corpus_size,
+            self.crashes)
+    }
 }
 
 impl From<&Params> for trace::Input {
@@ -137,7 +116,6 @@ impl From<&Params> for trace::Input {
         }
     }
 }
-
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct Params {
@@ -153,7 +131,7 @@ pub struct Params {
 
 impl Params {
 
-    pub fn save<P>(&self, path: P) -> Result<()>
+    pub fn save<P>(&self, path: P) -> Result<(), error::GenericError>
     where P: Into<std::path::PathBuf> {
         let path = path.into();
         let mut fp = BufWriter::new(std::fs::File::create(path)?);
@@ -162,7 +140,7 @@ impl Params {
         Ok(())
     }
 
-    pub fn load<P>(path: P) -> Result<Self>
+    pub fn load<P>(path: P) -> Result<Self, error::GenericError>
     where P: AsRef<std::path::Path>
     {
         let input_str = std::fs::read_to_string(&path)?;
@@ -173,14 +151,13 @@ impl Params {
 }
 
 impl FromStr for Params {
-    type Err = anyhow::Error;
+    type Err = error::GenericError;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let input = serde_json::from_str(s)?;
         Ok(input)
     }
 }
-
 
 pub struct Corpus {
     pub workdir: std::path::PathBuf,
@@ -197,7 +174,7 @@ impl Corpus {
        }
     }
 
-    pub fn load(&mut self) -> Result<usize> {
+    pub fn load(&mut self) -> Result<usize, error::GenericError> {
         let path = Path::new(&self.workdir).join("corpus");
         let paths = fs::read_dir(path)?;
         let mut total = 0;
@@ -207,7 +184,6 @@ impl Corpus {
                 let mut file = File::open(&path)?;
                 let mut data = Vec::new();
                 file.read_to_end(&mut data)?;
-                // fs::remove_file(path)?;
                 let hash = calculate_hash(&data);
                 self.members.insert(hash, data);
                 total += 1;
@@ -217,20 +193,9 @@ impl Corpus {
         Ok(total)
     }
 
-    pub fn add(&mut self, input: &Vec<u8>) -> Result<()> {
-        // self.queue.insert(coverage, input.to_vec());
+    pub fn add(&mut self, input: &[u8]) -> Result<(), error::GenericError> {
         let hash = calculate_hash(input);
-        match self.members.insert(hash, input.to_vec()) {
-            None => {
-                info!("file was added to corpus");
-            }
-            _ => ()
-        }
-        // let path = Path::new(&self.workdir)
-            // .join("corpus")
-            // .join(format!("{:x}.bin", hash));
-        // let mut file = File::create(path)?;
-        // file.write_all(&input)?;
+        self.members.insert(hash, input.to_vec());
         Ok(())
     }
 
@@ -246,69 +211,37 @@ pub fn calculate_hash<T: Hash + ?Sized>(t: &T) -> u64 {
 // with just mutate input
 // should return a ref
 // should work inplace
+// FIXME: add associated error type 
 
 pub trait Strategy {
+    type Input: AsRef<[u8]>;
 
-    // fn mutate_input(&mut self, input: &[u8]) -> Vec<u8>;
+    fn generate_new_input<'a>(&'a mut self, corpus: &mut Corpus) -> &'a Self::Input;
 
-    fn select_input(&mut self, corpus: &mut Corpus) -> Option<Vec<u8>>;
-
-    fn load_corpus(&mut self) -> anyhow::Result<()>;
-
-    fn handle_new_corpus(&mut self, data: &[u8]) -> anyhow::Result<()>;
-
-    fn handle_stats(&mut self, path: &Path, stats: &mut Stats) -> anyhow::Result<()>;
-
-    fn handle_execution(&mut self, params: &Params, data: &[u8], trace: &mut trace::Trace, corpus: &mut Corpus) -> anyhow::Result<usize>;
+    fn get_new_coverage(&mut self, params: &Params, trace: &mut trace::Trace, corpus: &mut Corpus) -> usize; 
 
     fn get_coverage(&mut self) -> usize;
 
-    fn get_queue_size(&mut self) -> usize;
+}
+
+
+#[derive(Debug, Error)]
+pub enum FuzzerError {
+    FileError(#[from]std::io::Error),
+    SerdeError(#[from]serde_json::Error),
+    GenericError(#[from]error::GenericError),
+    TracerError(#[from]trace::TracerError),
+    FirstExecFailed(String),
+    BadInputSize(usize),
 
 }
 
-// impl Strategy for Box<dyn Strategy> {
+impl std::fmt::Display for FuzzerError {
 
-//     fn select_input(&mut self, corpus: &mut Corpus) -> Option<Vec<u8>> {
-//         self.as_mut().select_input(corpus)
-//     }
-
-//     fn handle_stats(&mut self) -> {
-
-//     }
-//     fn handle_execution(&mut self, params: &Params, data: &[u8], trace: &mut trace::Trace, corpus: &mut Corpus) -> anyhow::Result<usize> {
-//         self.as_mut().handle_execution(params, data, trace, corpus)
-//     }
-
-//     fn get_coverage(&mut self) -> usize {
-//         self.as_mut().get_coverage()
-//     }
-
-//     fn get_queue_size(&mut self) -> usize {
-//         self.as_mut().get_queue_size()
-//     }
-
-// }
-
-// FIXME: need to pass that as parameter
-#[derive(Default)]
-pub struct Hook {
-
-}
-
-impl trace::Hook for Hook {
-
-    fn setup<T: trace::Tracer>(&self, _tracer: &mut T) {
-
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "error: {:?}", self)
     }
 
-    fn handle_breakpoint<T: trace::Tracer>(&mut self, _tracer: &mut T) -> Result<bool> {
-        Ok(true)
-    }
-
-    fn handle_trace(&self, _trace: &mut trace::Trace) -> Result<bool> {
-        Ok(true)
-    }
 }
 
 pub struct Fuzzer {
@@ -317,18 +250,18 @@ pub struct Fuzzer {
 }
 
 impl Fuzzer {
-    pub fn new<S>(path: S) -> Result<Self>
+    pub fn new<S>(path: S) -> Result<Self, FuzzerError>
     where S: Into<std::path::PathBuf> {
         let (tx, rx) = mpsc::channel();
 
         let path = path.into();
         let fuzzer = Fuzzer {
-            path: path,
+            path,
             channel: rx,
         };
 
-        let sender = tx.clone();
-        let copy = fuzzer.path.join("corpus").clone();
+        let sender = tx;
+        let copy = fuzzer.path.join("corpus");
         let _thread = thread::spawn(move || {
             loop {
                 let result = watch::watch(&sender, &copy);
@@ -339,34 +272,31 @@ impl Fuzzer {
         Ok(fuzzer)
     }
 
-    pub fn run<T, S>(&mut self, strategy: &mut S, params: &Params, tracer: &mut T, context: &trace::ProcessorState, trace_params: &trace::Params) -> Result<Stats> 
+    #[allow(clippy::too_many_arguments)]
+    pub fn run<T, S, H>(&mut self, corpus: &mut Corpus, strategy: &mut S, params: &Params, tracer: &mut T, context: &trace::ProcessorState, trace_params: &trace::Params, hook: &mut H) -> Result<Stats, FuzzerError> 
     where
         T: trace::Tracer,
+        H: trace::Hook,
         S: Strategy,
      {
-        info!("running fuzzer");
         let mut stats = Stats::new();
 
-        info!("first execution to map memory");
-
+        // first execution to map memory
         tracer.set_state(&context)?;
-        // FIXME: as parameters
-        let mut hook = Hook {};
-        let mut trace = tracer.run(trace_params, &mut hook)?;
+        let trace = tracer.run(trace_params, hook)?;
         match trace.status {
             trace::EmulationStatus::Success => {
             }
             _ => {
-                return Err(anyhow!("first execution failed!"))
+                return Err(FuzzerError::FirstExecFailed("first execution failed!".to_string()))
             }
         }
 
         tracer.restore_snapshot()?;
 
-        info!("reading input");
-        let input_size: usize = params.input_size.try_into()?;
+        let input_size: usize = params.input_size as usize;
         if input_size == 0 {
-            return Err(anyhow!("input size can't be 0"))
+            return Err(FuzzerError::BadInputSize(0))
         }
 
         let mut data = vec![0u8; input_size];
@@ -374,78 +304,65 @@ impl Fuzzer {
         let cr3 = tracer.cr3()?;
         tracer.read_gva(cr3, params.input, &mut data)?;
 
-        let mut corpus = Corpus::new(&self.path);
-        info!("add first trace to corpus");
-
-        // FIXME: strategy.load_corpus (send tracer + corpus)
-        strategy.load_corpus()?;
-        let _new = strategy.handle_execution(&params, &data, &mut trace, &mut corpus)?;
-
         stats.iterations += 1;
 
         stats.coverage = strategy.get_coverage() as u64;
 
-        stats.code += trace.code;
-        stats.data += trace.data;
+        stats.mapped_pages = tracer.get_mapped_pages()?;
 
-        let files = corpus.load()?;
-        info!("loaded {} file(s) from corpus", files);
-
-        info!("start fuzzing");
+        corpus.load()?;
 
         loop {
-            strategy.handle_stats(self.path.as_path(), &mut stats)?;
+            // unsure to have this in Strategy
+            // strategy.handle_stats(self.path.as_path(), &mut stats);
 
-            // FIXME: reload corpus periodically ?
-            match self.channel.try_recv() {
-                Ok(data) => {
-                    // FIXME: strategy new corpus
-                    strategy.handle_new_corpus(&data)?;
-                    corpus.add(&data)?;
-                }
-                _ => {}
+            if let Ok(data)  = self.channel.try_recv() {
+                corpus.add(&data)?;
             }
 
-            let input = match strategy.select_input(&mut corpus) {
-                None => {
-                    error!("no more input, stop");
-                    return Err(anyhow!("no more input"));
-                }
-                Some(data) => data,
-            };
+            let new_input = strategy.generate_new_input(corpus);
+            let input = new_input.as_ref();
+            let mut data = input.to_vec();
+            // useless copy ?
 
-            // println!("{:x?}", &input[..0x30]);
-            // input.resize(input_size, 0);
-            // let mutated = strategy.mutate_input(&input[..]);
-            // data[..].copy_from_slice(&mutated);
-            // FIXME: handle input size
-            match tracer.write_gva(cr3, params.input, &input[..0x1000]) {
-                Ok(()) => {}
-                Err(e) => {
-                    error!("can't write fuzzer input {:?}", e);
-                    return Err(anyhow!("can't write fuzzer input"));
-                }
-            }
+            tracer.write_gva(cr3, params.input, input)?;
 
             tracer.set_state(&context)?;
 
-            let mut trace = tracer.run(trace_params, &mut hook)?;
+            let mut trace = tracer.run(trace_params, hook)?;
 
             tracer.restore_snapshot()?;
 
-            let _new = strategy.handle_execution(&params, &input, &mut trace, &mut corpus)?;
+            let new = strategy.get_new_coverage(&params, &mut trace, corpus);
 
-            // FIXME: need to address error too
+            if new > 0 {
+                // save corpus
+                data.resize(input_size, 0);
+                let hash = calculate_hash(&data);
+                let path = std::path::Path::new(&self.path)
+                    .join("corpus")
+                    .join(format!("{:x}.bin", hash));
+                println!("discovered {} new address(es), adding file {:?} to corpus", new, path);
+                let mut file = std::fs::File::create(path)?;
+                file.write_all(&data)?;
+
+            }
+
             match trace.status {
-                trace::EmulationStatus::ForbiddenAddress(_) => {
+                trace::EmulationStatus::Success => {},
+                _ => {
+                    let hash = calculate_hash(&data);
+                    let path = std::path::Path::new(&self.path)
+                        .join("crashes")
+                        .join(format!("{:x}.bin", hash));
+                    println!("got abnormal exit {}, saving input to {:?}", trace.status, path);
+                    let mut file = std::fs::File::create(path)?;
+                    file.write_all(&data)?;
+
                     stats.crashes += 1;
                     if params.stop_on_crash {
                         break;
                     }
-                }
-                trace::EmulationStatus::Success => {},
-                _ => {
-                    warn!("got {:?}", trace.status);
                 }
             }
 
@@ -453,14 +370,10 @@ impl Fuzzer {
 
             stats.coverage = strategy.get_coverage() as u64;
 
-            // FIXME: tracer.get_mem
-            stats.code += trace.code;
-            stats.data += trace.data;
+            stats.mapped_pages = tracer.get_mapped_pages()?;
 
             stats.corpus_size = corpus.members.len();
-            stats.worklist_size = strategy.get_queue_size();
             
-            // FIXME: strategy handle_stats?
             if params.max_duration.as_secs() != 0 && stats.elapsed() > params.max_duration {
                 break;
             }
@@ -471,42 +384,253 @@ impl Fuzzer {
 
         }
 
-        strategy.handle_stats(self.path.as_path(), &mut stats)?;
+        // strategy.handle_stats(self.path.as_path(), &mut stats);
 
         Ok(stats)
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct MutationHint {
-    pub immediates: BTreeSet<u64>,
-    pub offsets: BTreeSet<u64>
-}
 
-impl MutationHint {
 
-    pub fn new() -> Self {
-        Self {
-            immediates: BTreeSet::new(),
-            offsets: BTreeSet::new()
+#[cfg(test)]
+mod test {
+
+    use crate::mutation::*;
+    use crate::fuzz::*;
+    use crate::trace;
+
+    use std::collections::BTreeSet;
+    #[derive(Default)]
+    struct TestHook {
+
+    }
+
+    impl trace::Hook for TestHook {
+        fn setup<T: trace::Tracer>(&self, _tracer: &mut T) {
+            todo!()
+        }
+
+            fn handle_breakpoint<T: trace::Tracer>(&mut self, _tracer: &mut T) -> Result<bool, trace::TracerError> {
+            todo!()
+        }
+
+            fn handle_trace(&self, _trace: &mut trace::Trace) -> Result<bool, trace::TracerError> {
+            todo!()
         }
     }
 
-    pub fn save<P>(&self, path: P) -> Result<()>
-    where P: AsRef<std::path::Path>
-    {
-        let mut fp = BufWriter::new(std::fs::File::create(&path)?);
-        let data = serde_json::to_vec_pretty(&self)?;
-        fp.write_all(&data)?;
-        Ok(())
+    #[derive(Default)]
+    struct TestStrategy {
+        pub mutator: Mutator,
+        pub coverage: BTreeSet<usize>,
+        index: usize,
+        expected: Vec<(usize, u8)>,
     }
 
-    pub fn load<P>(path: P) -> Result<Self>
-    where P: AsRef<std::path::Path>
-    {
-        let input_str = std::fs::read_to_string(&path)?;
-        let input = serde_json::from_str(&input_str)?;
-        Ok(input)
+    impl TestStrategy {
+
+        pub fn new() -> Self {
+            let mut mutator = Mutator::new().input_size(0x60);
+
+            let expected: Vec<(usize, u8)> = vec![
+                (0, 0x4d), (1, 0x3c), (2, 0x2b), (3, 0x1a),
+                (4, 0x00), (5, 0x04), (6, 0x01), (7, 0x00),
+                (8, 0x00), (9, 0x01), (0xa, 0x00), (0xb, 0x00),
+                (0xc, 0x00), (0xd, 0x00), (0xe, 0x00), (0xf, 0x00),
+                (0x10, 0x00), (0x11, 0x01), (0x12, 0x00), (0x13, 0x00),
+                (0x14, 0x00), (0x15, 0x00), (0x16, 0x00), (0x17, 0x00),
+                (0x18, 0x00), (0x19, 0x03), (0x1a, 0x00), (0x1b, 0x00),
+                (0x1c, 0x00), (0x1d, 0x00), (0x1e, 0x00), (0x1f, 0x00),
+                (0x20, 0x00), (0x21, 0x02), (0x22, 0x00), (0x23, 0x00),
+                (0x24, 0x00), (0x25, 0x00), (0x26, 0x00), (0x27, 0x00),
+                (0x28, 0x00), (0x29, 0x00), (0x2a, 0x03), (0x2b, 0x00),
+                (0x2c, 0x00), (0x2d, 0x00), (0x2e, 0x00), (0x2f, 0x00),
+                (0x30, 0x00), (0x31, 0x04), (0x32, 0x00), (0x33, 0x00),
+                (0x34, 0x00), (0x35, 0x00), (0x36, 0x00), (0x37, 0x00),
+                (0x38, 0x00), (0x39, 0x00), (0x3a, 0x00), (0x3b, 0x00),
+                (0x3c, 0x00), (0x3d, 0x00), (0x3e, 0x00), (0x3f, 0x00),
+                (0x40, 0x00), (0x41, 0x05), (0x42, 0x00), (0x43, 0x00),
+                (0x44, 0x00), (0x45, 0x00), (0x46, 0x00), (0x47, 0x00),
+                (0x48, 0x00), (0x49, 0x00), (0x4a, 0x06), (0x4b, 0x00),
+                (0x4c, 0x00), (0x4d, 0x00), (0x4e, 0x00), (0x4f, 0x00),
+                (0x50, 0xab), (0x51, 0x2a), (0x52, 0x00), (0x53, 0x00),
+                (0x54, 0x00), (0x55, 0x00), (0x56, 0x00), (0x57, 0x00),
+                (0x58, 0x00), (0x59, 0x00), (0x5a, 0x10), (0x5b, 0x00),
+                (0x5c, 0x00), (0x5d, 0x00), (0x5e, 0x00), (0x5f, 0x00),
+            ];
+
+            for (offset, value) in expected.iter() {
+                if *value != 0 {
+                    mutator.offsets.push(*offset);
+
+                }
+            }
+
+            Self {
+                mutator,
+                coverage: BTreeSet::new(),
+                index: 0,
+                expected,
+            }
+        }
+
+        pub fn check_expected_coverage(&self, corpus: &mut Corpus) -> usize {
+            let mut max_coverage = 0;
+            for data in corpus.members.values() {
+                let mut coverage = BTreeSet::new();
+                for (offset, value) in self.expected.iter() {
+                    if data[*offset] == *value {
+                        coverage.insert(*offset);
+                    }
+                }
+                println!("{:x?}", data);
+                println!("coverage is {}", coverage.len());
+
+                max_coverage = std::cmp::max(max_coverage, coverage.len());
+                if coverage.len() == self.expected.len() {
+                    return max_coverage
+                }
+            }
+
+            max_coverage
+
+        }
     }
+
+    impl Strategy for TestStrategy {
+        type Input = Vec<u8>;
+
+        // FIXME: should have mutation hint too
+        fn generate_new_input(&mut self, corpus: &mut Corpus) -> &Self::Input {
+            let instance = corpus.members.values().nth(self.index);
+            self.index = (self.index + 1) ^ corpus.members.len();
+            if let Some(instance) = instance {
+                self.mutator.clear();
+                self.mutator.input(&instance);
+                self.mutator.mutate(4);
+                assert_eq!(self.mutator.input.len(), 0x60);
+                &self.mutator.input
+            } else {
+                self.mutator.mutate(4);
+                assert_eq!(self.mutator.input.len(), 0x60);
+                &self.mutator.input
+            }
+        }
+
+        // FIXME: type error
+        // new coverage ?
+        // check new coverage ?
+        fn get_new_coverage(&mut self, _params: &Params, _trace: &mut trace::Trace, _corpus: &mut Corpus) -> usize {
+
+            let data = &self.mutator.input;
+            assert_eq!(data.len(), 0x60);
+
+            let mut coverage = BTreeSet::new();
+
+            for (offset, value) in self.expected.iter() {
+                if data[*offset] == *value {
+                    coverage.insert(*offset);
+                }
+            }
+
+            let new = coverage.difference(&self.coverage).count();
+            self.coverage.append(&mut coverage);
+            new
+
+        }
+
+        fn get_coverage(&mut self) -> usize {
+            self.coverage.len()
+        }
+
+    }
+
+    #[derive(Default)]
+    struct TestTracer {
+
+    }
+
+    impl trace::Tracer for TestTracer {
+
+        fn get_state(&mut self) -> Result<trace::ProcessorState, trace::TracerError> {
+            todo!()
+        }
+
+        fn set_state(&mut self, _state: &trace::ProcessorState) -> Result<(), trace::TracerError> {
+            Ok(())
+        }
+
+        fn run<H: trace::Hook>(&mut self, _params: &trace::Params, _hook: &mut H) -> Result<trace::Trace, trace::TracerError> {
+            let trace = trace::Trace::new();
+            Ok(trace)
+        }
+
+        fn restore_snapshot(&mut self) -> Result<usize, trace::TracerError> {
+            Ok(0)
+        }
+
+        fn read_gva(&mut self, _cr3: u64, _vaddr: u64, data: &mut [u8]) -> Result<(), trace::TracerError> {
+            let buf = vec![0u8; 0x60];
+            data.clone_from_slice(&buf[..]);
+            Ok(())
+        }
+
+        fn write_gva(&mut self, _cr3: u64, _vaddr: u64, _data: &[u8]) -> Result<(), trace::TracerError> {
+            Ok(())
+        }
+
+        fn cr3(&mut self) -> Result<u64, trace::TracerError> {
+            Ok(0x807000)
+        }
+
+        fn singlestep<H: trace::Hook>(&mut self, _params: &trace::Params, _hook: &mut H) -> Result<trace::Trace, trace::TracerError> {
+            todo!()
+        }
+
+        fn add_breakpoint(&mut self, _address: u64) {
+            todo!()
+        }
+
+        fn get_mapped_pages(&self) -> Result<usize, trace::TracerError> {
+            Ok(0)
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_fuzzer() {
+
+        let tmp = tempdir::TempDir::new("test_fuzzer").unwrap();
+        let corpus = tmp.path().join("corpus");
+        std::fs::create_dir(&corpus).unwrap();
+
+        let mut fuzzer = Fuzzer::new(tmp.path()).unwrap();
+
+        let mut params = Params::default();
+        params.input_size = 0x60;
+        params.max_duration = std::time::Duration::from_millis(60000);
+
+        let mut tracer = TestTracer::default();
+        let context = trace::ProcessorState::default();
+        let trace_params = trace::Params::default();
+
+        let mut strategy = TestStrategy::new();
+
+        assert_eq!(strategy.mutator.input.len(), 0x60);
+
+        let mut corpus = Corpus::new(tmp.path());
+        corpus.load().unwrap();
+
+        let mut hook = TestHook::default();
+
+        let stats = fuzzer.run(&mut corpus, &mut strategy, &params, &mut tracer, &context, &trace_params, &mut hook).unwrap();
+        println!("{}", stats);
+
+        assert_eq!(strategy.check_expected_coverage(&mut corpus), strategy.expected.len());
+
+        tmp.close().unwrap();
+
+    }
+
 
 }

@@ -2,10 +2,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::sync::mpsc;
 
-// use crossbeam_channel::unbounded;
-use notify;
 use notify::Watcher;
-// ::{RecommendedWatcher, RecursiveMode, Result, Watcher};
 
 pub fn watch<S>(sender: &mpsc::Sender<Vec<u8>>, path: S) -> notify::Result<()>
 where S: Into<std::path::PathBuf> {
@@ -25,24 +22,21 @@ where S: Into<std::path::PathBuf> {
         match rx.recv() {
             Ok(event) => {
                 // info!("received event {:?}", event);
-                match event {
-                    notify::DebouncedEvent::Create(path) => {
-                        let mut file = File::open(&path)?;
-                        let mut data = Vec::new();
-                        file.read_to_end(&mut data)?;
-                        match sender.send(data) {
-                            _ => {}
-                        }
-                    }
-                    _ => {}
+                if let notify::DebouncedEvent::Create(path) = event {
+                    let mut file = File::open(&path)?;
+                    let mut data = Vec::new();
+                    file.read_to_end(&mut data)?;
+                    sender.send(data).map_err(|e| {
+                        let e = format!("{:?}", e);
+                        notify::Error::Generic(e)
+                    })?;
                 }
             },
             Err(err) => {
-                error!("watch error: {:?}", err);
-                break;
+                let e = format!("{:?}", err);
+                return Err(notify::Error::Generic(e));
             }
         };
     }
 
-    Ok(())
 }

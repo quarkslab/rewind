@@ -7,12 +7,14 @@ use std::io::{BufWriter, Write};
 
 use std::time::{Instant, Duration};
 
-use anyhow::Result;
+use thiserror::Error;
+// use anyhow::Result;
 
 use serde::{Serialize, Deserialize, Deserializer, de::Error};
 
+use crate::error;
 
-#[derive(Serialize, Deserialize, CustomDebug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Segment {
     pub selector: u16,
     pub base: u64,
@@ -20,7 +22,7 @@ pub struct Segment {
     pub flags: u16
 }
 
-#[derive(Serialize, Deserialize, CustomDebug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct ProcessorState {
     pub rax: u64,
     pub rbx: u64,
@@ -69,7 +71,7 @@ pub struct ProcessorState {
 
 impl ProcessorState {
 
-    pub fn save<P>(&self, path: P) -> Result<()>
+    pub fn save<P>(&self, path: P) -> Result<(), error::GenericError>
     where P: AsRef<std::path::Path>
     {
         let mut fp = BufWriter::new(std::fs::File::create(&path)?);
@@ -78,7 +80,7 @@ impl ProcessorState {
         Ok(())
     }
 
-    pub fn load<P>(path: P) -> Result<Self>
+    pub fn load<P>(path: P) -> Result<Self, error::GenericError>
     where P: AsRef<std::path::Path>
     {
         let input_str = std::fs::read_to_string(&path)?;
@@ -89,11 +91,33 @@ impl ProcessorState {
 }
 
 impl FromStr for ProcessorState {
-    type Err = anyhow::Error;
+    type Err = error::GenericError;
 
-    fn from_str(s: &str) -> Result<ProcessorState> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let context = serde_json::from_str(s)?;
         Ok(context)
+    }
+}
+
+impl std::fmt::Display for ProcessorState {
+
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "rax={:016x} rbx={:016x} rcx={:016x}
+rdx={:016x} rsi={:016x} rdi={:016x}
+rip={:016x} rsp={:016x} rbp={:016x}
+ r8={:016x}  r9={:016x} r10={:016x}
+r11={:016x} r12={:016x} r13={:016x}
+r14={:016x} r15={:016x}
+cs={:04x}  ss={:04x}  ds={:04x}  es={:04x}  fs={:04x}  gs={:04x}  rflags={:04x}",
+        self.rax, self.rbx, self.rcx,
+        self.rdx, self.rsi, self.rdi,
+        self.rip, self.rsp, self.rbp,
+        self.r8, self.r9, self.r10,
+        self.r11, self.r12, self.r13,
+        self.r14, self.r15,
+        self.cs.selector, self.ss.selector, self.ds.selector,
+        self.es.selector, self.fs.selector, self.gs.selector,
+        self.rflags)
     }
 }
 
@@ -111,25 +135,22 @@ impl Default for CoverageMode {
 }
 
 impl FromStr for CoverageMode {
-    type Err = anyhow::Error;
+    type Err = error::GenericError;
 
-    fn from_str(s: &str) -> Result<CoverageMode> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let coverage_mode = match s {
             "no" => CoverageMode::None,
             "instrs" => CoverageMode::Instrs,
             "hit" => CoverageMode::Hit,
             _ => {
-                return Err(anyhow!(
-                    "invalid coverage mode",
-                ))
+                return Err(error::GenericError::Generic("invalid coverage mode".to_string()))
             }
         };
         Ok(coverage_mode)
     }
 }
 
-
-#[derive(Default, Serialize, Deserialize, CustomDebug)]
+#[derive(Default, Serialize, Deserialize, Debug)]
 pub struct Params {
     #[serde(skip)]
     pub limit: u64,
@@ -146,7 +167,7 @@ pub struct Params {
 }
 
 impl Params {
-    pub fn save<P>(&self, path: P) -> Result<()>
+    pub fn save<P>(&self, path: P) -> Result<(), error::GenericError>
     where P: AsRef<std::path::Path>
     {
         let mut fp = BufWriter::new(std::fs::File::create(&path)?);
@@ -155,7 +176,7 @@ impl Params {
         Ok(())
     }
 
-    pub fn load<P>(path: P) -> Result<Self>
+    pub fn load<P>(path: P) -> Result<Self, error::GenericError>
     where P: AsRef<std::path::Path>
     {
         let input_str = std::fs::read_to_string(&path)?;
@@ -166,9 +187,9 @@ impl Params {
 }
 
 impl FromStr for Params {
-    type Err = anyhow::Error;
+    type Err = error::GenericError;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let params = serde_json::from_str(s)?;
         Ok(params)
     }
@@ -201,7 +222,7 @@ impl std::fmt::Display for EmulationStatus {
     }
 }
 
-#[derive(CustomDebug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Context {
     pub rax: u64,
     pub rbx: u64,
@@ -223,7 +244,7 @@ pub struct Context {
     pub rip: u64,
 }
 
-#[derive(CustomDebug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Trace {
     #[serde(skip)]
     pub start: Option<Instant>,
@@ -254,7 +275,7 @@ impl Trace {
         }
     }
 
-    pub fn save<P>(&self, path: P) -> Result<()>
+    pub fn save<P>(&self, path: P) -> Result<(), error::GenericError>
     where P: AsRef<std::path::Path>
     {
         let mut fp = BufWriter::new(std::fs::File::create(&path)?);
@@ -263,7 +284,7 @@ impl Trace {
         Ok(())
     }
 
-    pub fn load<P>(path: P) -> Result<Self>
+    pub fn load<P>(path: P) -> Result<Self, error::GenericError>
     where P: AsRef<std::path::Path>
     {
         let input_str = std::fs::read_to_string(&path)?;
@@ -273,10 +294,17 @@ impl Trace {
 
 }
 
-impl FromStr for Trace {
-    type Err = anyhow::Error;
+impl Default for Trace {
 
-    fn from_str(s: &str) -> Result<Trace> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FromStr for Trace {
+    type Err = error::GenericError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let result = serde_json::from_str(s)?;
         Ok(result)
     }
@@ -313,7 +341,7 @@ impl From<HexNumber> for u64 {
 }
 
 
-#[derive(Default, Serialize, Deserialize, CustomDebug)]
+#[derive(Default, Serialize, Deserialize, Debug)]
 pub struct Input {
     pub address: HexNumber,
     pub size: HexNumber,
@@ -321,7 +349,7 @@ pub struct Input {
 
 impl Input {
 
-    pub fn save<P>(&self, path: P) -> Result<()>
+    pub fn save<P>(&self, path: P) -> Result<(), error::GenericError>
     where P: AsRef<std::path::Path>
     {
         let mut fp = BufWriter::new(std::fs::File::create(&path)?);
@@ -330,7 +358,7 @@ impl Input {
         Ok(())
     }
 
-    pub fn load<P>(path: P) -> Result<Self>
+    pub fn load<P>(path: P) -> Result<Self, error::GenericError>
     where P: AsRef<std::path::Path>
     {
         let input_str = std::fs::read_to_string(&path)?;
@@ -341,78 +369,64 @@ impl Input {
 }
 
 impl FromStr for Input {
-    type Err = anyhow::Error;
+    type Err = error::GenericError;
 
-    fn from_str(s: &str) -> Result<Input> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let input = serde_json::from_str(s)?;
         Ok(input)
     }
 }
 
-pub trait Tracer {
-
-    fn get_state(&mut self) -> Result<ProcessorState>;
-
-    fn set_state(&mut self, state: &ProcessorState) -> Result<()>;
-
-    fn run<H: Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace>;
-
-    fn restore_snapshot(&mut self) -> Result<usize>;
-
-    fn read_gva(&mut self, cr3: u64, vaddr: u64, data: &mut [u8]) -> Result<()>;
-
-    fn write_gva(&mut self, cr3: u64, vaddr: u64, data: &[u8]) -> Result<()>;
-
-    fn cr3(&mut self) -> Result<u64>;
-
-    fn singlestep<H: Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace>;
-
-    fn add_breakpoint(&mut self, address: u64);
+#[derive(Debug, Error)]
+pub enum TracerError {
+    FileError(#[from]std::io::Error),
+    SerdeError(#[from]serde_json::Error),
+    GenericError(#[from]error::GenericError),
+    FirstExecFailed(String),
+    BadInputSize(usize),
 
 }
 
-// impl Tracer for Box<dyn Tracer> {
+impl std::fmt::Display for TracerError {
 
-//     fn get_state(&mut self) -> Result<ProcessorState> {
-//         self.as_mut().get_state()
-//     }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "error: {:?}", self)
+    }
 
-//     fn set_state(&mut self, state: &ProcessorState) -> Result<()> {
-//         self.as_mut().set_state(state)
-//     }
+}
 
-//     fn run(&mut self, params: &Params, hook: &mut Hook) -> Result<Trace> {
-//         self.as_mut().run(params, hook)
-//     }
+// FIXME: no need to have read_gva and write_gva in tracer
+pub trait Tracer {
 
-//     fn restore_snapshot(&mut self) -> Result<usize> {
-//         self.as_mut().restore_snapshot()
-//     }
+    fn get_state(&mut self) -> Result<ProcessorState, TracerError>;
 
-//     fn read_gva(&mut self, cr3: u64, vaddr: u64, data: &mut [u8]) -> Result<()> {
-//         self.as_mut().read_gva(cr3, vaddr, data)
-//     }
+    fn set_state(&mut self, state: &ProcessorState) -> Result<(), TracerError>;
 
-//     fn write_gva(&mut self, cr3: u64, vaddr: u64, data: &[u8]) -> Result<()> {
-//         self.as_mut().write_gva(cr3, vaddr, data)
-//     }
+    fn run<H: Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace, TracerError>;
 
-//     fn cr3(&mut self) -> Result<u64> {
-//         self.as_mut().cr3()
-//     }
+    fn restore_snapshot(&mut self) -> Result<usize, TracerError>;
 
-//     fn singlestep(&mut self, params: &Params) -> Result<Trace> {
-//         self.as_mut().singlestep(params)
-//     }
+    fn read_gva(&mut self, cr3: u64, vaddr: u64, data: &mut [u8]) -> Result<(), TracerError>;
 
-// }
+    fn write_gva(&mut self, cr3: u64, vaddr: u64, data: &[u8]) -> Result<(), TracerError>;
+
+    fn cr3(&mut self) -> Result<u64, TracerError>;
+
+    fn singlestep<H: Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace, TracerError>;
+
+    fn add_breakpoint(&mut self, address: u64);
+
+    fn get_mapped_pages(&self) -> Result<usize, TracerError>;
+
+}
+
 
 pub trait Hook: Default {
     fn setup<T: Tracer>(&self, tracer: &mut T);
 
-    fn handle_breakpoint<T: Tracer>(&mut self, tracer: &mut T) -> Result<bool>;
+    fn handle_breakpoint<T: Tracer>(&mut self, tracer: &mut T) -> Result<bool, TracerError>;
 
-    fn handle_trace(&self, trace: &mut Trace) -> Result<bool>;
+    fn handle_trace(&self, trace: &mut Trace) -> Result<bool, TracerError>;
 
 }
 
