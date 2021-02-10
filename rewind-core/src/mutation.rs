@@ -1,158 +1,103 @@
 
-use std::{collections::BTreeSet, io::BufWriter};
+use std::{collections::BTreeSet, io::BufWriter, sync::RwLock};
+use std::sync::Arc;
+
 use std::io::Write;
 use std::convert::TryInto;
 
 use serde::{Serialize, Deserialize};
 
+use crate::{trace, fuzz::{Params, Strategy, Corpus}};
 
-// struct BasicDatabase<'a> (&'a mut fuzz::Corpus);
+#[derive(Debug, Default)]
+pub struct RoundRobinBalancer<T: Ord> {
+    pub items: BTreeSet<T>,
+    index: Arc<RwLock<usize>>,
+}
 
-// impl <'a> basic_mutator::InputDatabase for BasicDatabase<'a> {
+impl <T: Ord> RoundRobinBalancer<T> {
 
-//     fn num_inputs(&self) -> usize {
-//         self.0.members.len()
+    pub fn insert(&mut self, item: T) {
+        self.items.insert(item);
+    }
 
-//     }
+    pub fn rotate(&mut self) -> Option<&T> {
+        let item = self.index.try_write();
+        let item = if let Ok(mut index) = item {
+            *index = (*index + 1) % self.items.len();
 
-//     fn input(&self, idx: usize) -> Option<&[u8]> {
-//         let input = self.0.members.values().nth(idx);
-//         input.map(|i| i.as_ref())
-//     }
-// }
+            self.items.iter().nth(*index)
+        } else { None };
+        item
+    }
+}
 
-// pub struct BasicStrategy {
-//     queue: Vec<Vec<u8>>,
-//     coverage: BTreeSet<u64>,
-//     mutator: basic_mutator::Mutator,
-//     last_refresh: std::time::Instant,
-// }
+#[derive(Default)]
+pub struct BasicStrategy {
+    pub mutator: Mutator,
+    pub coverage: BTreeSet<u64>,
+    balancer: RoundRobinBalancer<u64>,
+}
 
-// impl BasicStrategy {
+impl BasicStrategy {
 
-//     pub fn new(max_input_size: usize) -> Self {
-//         let mutator = basic_mutator::Mutator::new()
-//             // .seed(1337)
-//             .max_input_size(max_input_size);
-        
-//         Self {
-//             queue: Vec::new(),
-//             coverage: BTreeSet::new(),
-//             mutator,
-//             last_refresh: std::time::Instant::now(),
-//         }
-        
-//     }
-// }
+    pub fn new() -> Self {
+        let mutator = Mutator::new().input_size(0x60);
 
-// impl fuzz::Strategy for BasicStrategy {
+        Self {
+            mutator,
+            coverage: BTreeSet::new(),
+            balancer: RoundRobinBalancer::default(),
+        }
+    }
 
-//     // FIXME: select input with higher coverage first
-//     fn select_input(&mut self, corpus: &mut fuzz::Corpus) -> Option<Vec<u8>> { 
-//         if self.last_refresh.elapsed() > std::time::Duration::from_secs(5) {
-//             let path = std::path::Path::new(&corpus.workdir).join("hints.json");
-//             if path.exists() {
-//                 match fuzz::MutationHint::load(path) {
-//                     Ok(rules) => {
-//                         self.mutator.accessed = rules.offsets.iter().map(|o| *o as usize).collect();
-//                         self.mutator.immediate_values = rules.immediates.iter().map(|o| o.to_le_bytes().to_vec()).collect();
-//                     }
-//                     Err(e) => {
-//                         warn!("can't load rules {}", e);
-//                     }
-//                 }
-//             }
-//             self.last_refresh = std::time::Instant::now()
-//         }
+}
 
-//         // need to populate with trace, need tracer as input
-//         // no need to use a queue, should return a ref to mutator.input?
-//         // really need to rewrite this:w
-//         if self.queue.is_empty() {
-//             let database = BasicDatabase(corpus);
-//             for (_hash, item) in database.0.members.iter() {
-//                 // self.queue.push(item.clone());
-//                 self.mutator.input.clear();
-//                 self.mutator.input.extend_from_slice(item);
+impl Strategy for BasicStrategy {
 
-//                 // self.mutator.mutate(4, &database);
-//                 self.mutator.mutate(4, &basic_mutator::EmptyDatabase);
-//                 let mut mutant = self.mutator.input.clone();
-//                 mutant.resize(item.len(), 0);
-//                 self.queue.push(mutant);
-//             }
-//         };
+    // FIXME: should have mutation hint too
+    fn generate_new_input(&mut self, data: &mut [u8], corpus: &mut Corpus, _hint: &mut MutationHint) {
+        // self.mutator.accessed = rules.offsets.iter().map(|o| *o as usize).collect();
+        // self.mutator.immediate_values = rules.immediates.iter().map(|o| o.to_le_bytes().to_vec()).collect();
 
-//         self.queue.pop()
-//     }
+        corpus.members.iter().for_each(|(name, _data)| {
+            self.balancer.insert(*name);
+        });
 
-//     // FIXME: need to path fuzzer path
-//     fn handle_execution(&mut self, _params: &fuzz::Params, data: &[u8], trace: &mut trace::Trace, corpus: &mut fuzz::Corpus) -> anyhow::Result<usize> {
+        if let Some(key) = self.balancer.rotate() {
 
-//         let new = trace.seen.difference(&self.coverage).count();
-
-//         // FIXME: need to load queue with that
-//         if new > 0 {
-//             let hash = fuzz::calculate_hash(data);
-//             let path = std::path::Path::new(&corpus.workdir)
-//                 .join("corpus")
-//                 .join(format!("{:x}.bin", hash));
-//             println!("discovered {} new address(es), adding file {:?} to corpus", new, path);
-//             let mut file = std::fs::File::create(path)?;
-//             file.write_all(data)?;
-//         }
-
-//         match trace.status {
-//             trace::EmulationStatus::Success => { }
-//             _ => {
-//                 let hash = fuzz::calculate_hash(data);
-//                 let path = std::path::Path::new(&corpus.workdir)
-//                     .join("crashes")
-//                     .join(format!("{:x}.bin", hash));
-//                 println!("got abnormal exit {}, saving input to {:?}", trace.status, path);
-//                 let mut file = std::fs::File::create(path)?;
-//                 file.write_all(data)?;
-
-//             }
-//         }
-
-//         self.coverage.append(&mut trace.seen);
-//         Ok(new)
-
-//     }
-
-//     fn load_corpus(&mut self) -> anyhow::Result<()> {
-//         Ok(())
-//     }
-
-//     fn handle_new_corpus(&mut self, _data: &[u8]) -> anyhow::Result<()> {
-//         Ok(())
-//     }
-
-//     // FIXME: need a save_stats to save even if it is not needed
-//     fn handle_stats(&mut self, workdir: &Path, stats: &mut crate::fuzz::Stats) -> anyhow::Result<()> {
-//         let elapsed = chrono::Utc::now() - stats.updated;
-//         if elapsed.to_std()? < std::time::Duration::from_secs(1) {
-//             return Ok(())
-//         }
-
-//         stats.updated = chrono::Utc::now();
-
-//         let path = workdir
-//             .join("instances")
-//             .join(format!("{}.json", stats.uuid));
+            let instance = corpus.members.get(key);
             
-//         stats.save(path)
-//     }
+            if let Some(instance) = instance {
+                self.mutator.clear();
+                self.mutator.input(&instance);
+                self.mutator.mutate(4);
+                data[..self.mutator.input.len()].copy_from_slice(&self.mutator.input[..]);
+            } 
+        } else {
+            self.mutator.mutate(4);
+            data[..self.mutator.input.len()].copy_from_slice(&self.mutator.input[..]);
+        }
+    }
 
-//     fn get_coverage(&mut self) -> usize {
-//         self.coverage.len()
-//     }
+    // FIXME: use coverage to change corpus choice strategy ?
+    fn check_new_coverage(&mut self, _params: &Params, trace: &mut trace::Trace, _corpus: &mut Corpus) -> usize {
+        let new = trace.seen.difference(&self.coverage).count();
 
-//     fn get_queue_size(&mut self) -> usize {
-//         self.queue.len()
-//     }
-// }
+        if new > 0 {
+
+        }
+
+        self.coverage.append(&mut trace.seen);
+
+        new
+    }
+
+    fn get_coverage(&mut self) -> usize {
+        self.coverage.len()
+    }
+
+}
 
 
 /// A basic random number generator based on xorshift64 with 64-bits of state
@@ -423,7 +368,8 @@ impl Default for Mutator {
 #[derive(Serialize, Deserialize)]
 pub struct MutationHint {
     pub immediates: BTreeSet<u64>,
-    pub offsets: BTreeSet<u64>
+    pub offsets: BTreeSet<u64>,
+    pub ranges: BTreeSet<(usize, usize)>
 }
 
 impl MutationHint {
@@ -431,7 +377,8 @@ impl MutationHint {
     pub fn new() -> Self {
         Self {
             immediates: BTreeSet::new(),
-            offsets: BTreeSet::new()
+            offsets: BTreeSet::new(),
+            ranges: BTreeSet::new()
         }
     }
 

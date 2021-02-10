@@ -3,17 +3,17 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SnapshotError {
-    Generic(String),
+    #[error("generic error {}", .0)]
+    GenericError(String),
+
+    #[error("missing page {:x}", .0)]
+    MissingPage(u64),
+
+    #[error(transparent)]
+    FileError(#[from]std::io::Error)
 
 }
 
-impl std::fmt::Display for SnapshotError {
-
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "error: {:?}", self)
-    }
-
-}
 
 pub trait Snapshot {
 

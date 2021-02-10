@@ -8,10 +8,11 @@ edition = "2018"
 
 [dependencies]
 bitflags = "1.2.1"
-custom_debug_derive = "0.4.0"
-anyhow = "1.0.28"
 log = "0.4.8"
 zydis = "3.0"
 
 whvp-sys = { path = "../whvp-sys" }
 rewind-core = { path = "../rewind-core" }
+
+[dev-dependencies]
+pretty_assertions = "0.6.1"

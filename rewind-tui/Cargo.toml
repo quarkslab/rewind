@@ -9,6 +9,6 @@ edition = "2018"
 [dependencies]
 crossterm = "0.18.2"
 tui = { git = "https://github.com/fdehau/tui-rs", features = ["crossterm"], default-features = false }
-anyhow = "1.0.28"
+thiserror = "1.0.22"
 
 rewind-core = { path = "../rewind-core" }

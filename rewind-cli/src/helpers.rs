@@ -1,6 +1,5 @@
 // from https://github.com/jonhoo/rust-agenda
 
-use term;
 use std::fmt;
 use std::io::prelude::*;
 
@@ -66,7 +65,7 @@ impl Progress {
             Progress::Headline | Progress::Section => {
                 // empty line after section end
                 let mut t = term::stderr().unwrap();
-                writeln!(t, "").unwrap();
+                writeln!(t).unwrap();
 
                 Progress::Section
             }

@@ -1,9 +1,13 @@
 
-use crate::Rewind;
+use color_eyre::eyre::Result;
 
-fn main() -> Result<(), Box<dyn Error>> {
+use rewind_cli::Rewind;
+use rewind_core::trace::NoHook;
 
-    Rewind::parse_args()
+fn main() -> Result<()> {
+
+    color_eyre::install()?;
+    Rewind::<NoHook>::parse_args()
             .run()?;
 
     Ok(())

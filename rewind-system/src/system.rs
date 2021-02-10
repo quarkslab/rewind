@@ -1,5 +1,8 @@
 
-use anyhow::Result;
+
+use std::char::DecodeUtf16Error;
+
+use thiserror::Error;
 
 use deku::prelude::*;
 
@@ -7,6 +10,21 @@ use rewind_core::mem::X64VirtualAddressSpace;
 
 use crate::pe;
 
+#[derive(Debug, Error)]
+pub enum SystemError {
+    #[error("parse error: {}", .0)]
+    ParseError(String),
+
+    #[error("mem error: {0}")]
+    MemError(#[from] rewind_core::mem::VirtMemError),
+
+    #[error("deku error: {0}")]
+    DekuError(#[from] deku::error::DekuError),
+
+    #[error("decode error: {0}")]
+    DecodeError(#[from] DecodeUtf16Error),
+
+}
 
 pub struct System <'a> {
 
@@ -19,7 +37,7 @@ pub struct System <'a> {
 impl <'a> System <'a>
 {
 
-    pub fn new(snapshot: &'a rewind_snapshot::DumpSnapshot<'a>) -> Result<Self>
+    pub fn new(snapshot: &'a rewind_snapshot::DumpSnapshot<'a>) -> Result<Self, SystemError>
     {
         let system = Self {
             snapshot,
@@ -35,7 +53,7 @@ impl <'a> System <'a>
         vec![]
     } 
 
-    pub fn load_modules(&mut self) -> Result<()> {
+    pub fn load_modules(&mut self) -> Result<(), SystemError> {
         let cr3 = self.snapshot.get_cr3();
         // println!("cr3 is {:x}", cr3);
 
@@ -58,7 +76,7 @@ impl <'a> System <'a>
             let dllname = entry.BaseDllName.Buffer;
             let length = entry.BaseDllName.Length as usize;
 
-            let mut name = vec![0u8; length.into()];
+            let mut name = vec![0u8; length];
             self.snapshot.read_gva(cr3, dllname, &mut name)?;
 
             let iter = (0..length / 2).map(|i| u16::from_le_bytes([name[2*i], name[2*i+1]]));
@@ -88,7 +106,7 @@ impl <'a> System <'a>
         })
     }
 
-    pub fn get_file_information(&self, module: &LoadedModule) -> Result<pe::FileInformation> {
+    pub fn get_file_information(&self, module: &LoadedModule) -> Result<pe::FileInformation, SystemError> {
         let cr3 = self.snapshot.get_cr3();
 
         let addr = module.base;
@@ -105,7 +123,7 @@ impl <'a> System <'a>
         Ok(info)
 
     }
-    pub fn get_debug_information(&self, module: &LoadedModule) -> Result<pe::DebugInformation> {
+    pub fn get_debug_information(&self, module: &LoadedModule) -> Result<pe::DebugInformation, SystemError> {
         let cr3 = self.snapshot.get_cr3();
 
         let addr = module.base;
@@ -128,7 +146,7 @@ impl <'a> System <'a>
         let (_, directory) = pe::ImageDebugDirectory::from_bytes((&buf, 0))?;
 
         if directory.debug_type != 2 {
-            return Err(anyhow!("debug type {:x} is not handled (yet)", directory.debug_type));
+            return Err(SystemError::ParseError(format!("debug type {:x} is not handled (yet)", directory.debug_type)));
         }
 
         let address = module.base + directory.address_of_rawdata as u64;
@@ -139,7 +157,7 @@ impl <'a> System <'a>
         let (_, debug) = pe::CodeView::from_bytes((&buf, 0))?;
 
         if debug.signature != 0x53445352 {
-            return Err(anyhow!("invalid codeview signature {:x}", debug.signature));
+            return Err(SystemError::ParseError(format!("invalid codeview signature {:x}", debug.signature)));
         }
 
         let name = String::from_utf8_lossy(&buf[0x18..size-1]);
@@ -192,7 +210,7 @@ pub struct LoadedModule {
 
 impl LoadedModule {
 
-    pub fn new(name: String, base: u64, size: u64) -> Result<Self> {
+    pub fn new(name: String, base: u64, size: u64) -> Result<Self, SystemError> {
 
         let module = Self {
             name,

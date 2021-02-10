@@ -3,10 +3,8 @@ use std::convert::TryInto;
 use std::collections::BTreeSet;
 use std::time::Instant;
 
-use anyhow::Result;
-
-use rewind_core::mem;
-use rewind_core::trace::{self, ProcessorState, Context, Params, Tracer, Trace, EmulationStatus};
+use rewind_core::mem::{self, VirtMemError};
+use rewind_core::trace::{self, ProcessorState, Context, Params, Tracer, Trace, EmulationStatus, TracerError};
 use rewind_core::snapshot::Snapshot;
 
 use bochscpu::cpu::{Cpu, RunState, State, Seg, GlobalSeg};
@@ -44,8 +42,8 @@ impl From<State> for LocalContext {
 }
 
 // FIXME: only trace struct
-#[derive(CustomDebug)]
-struct BochsHooks<'a> {
+#[derive(Debug)]
+struct BochsHooks <'a, S: Snapshot>{
     singlestep: bool,
     // return_address: u64,
     // excluded_addresses: HashMap<String, u64>,
@@ -60,11 +58,13 @@ struct BochsHooks<'a> {
     // mem_access: Vec<(u64, u64, u64, usize, String)>,
     queue: Vec<(*mut std::ffi::c_void, u64, Option<Context>)>,
     // immediates: Vec<u64>,
-    params: &'a Params,
-    trace: &'a mut Trace,
+    params: Option<Params>,
+    trace: Option<Trace>,
+    allocator: mem::Allocator,
+    snapshot: &'a S,
 }
 
-impl <'a> hook::Hooks for BochsHooks <'a>{
+impl <S: Snapshot> hook::Hooks for BochsHooks <'_, S> {
     // fn reset(&mut self, _id: u32, _ty: ResetSource) {}
     // fn hlt(&mut self, _id: u32) {}
     // fn mwait(&mut self, _id: u32, _addr: PhyAddress, _len: usize, _flags: u32) {}
@@ -100,21 +100,24 @@ impl <'a> hook::Hooks for BochsHooks <'a>{
         const BX_IA_CMP_EWIW: u32 = 0x4f;
         const BX_IA_CMP_EWSIB: u32 = 0x58;
 
-        match op {
-            BX_IA_CMP_RAXID | BX_IA_CMP_EQID | BX_IA_CMP_EQSIB => {
-                let immediate = unsafe { opcode::instr_imm64(ins) };
-                self.trace.immediates.insert(immediate);
-            }
-            BX_IA_CMP_EAXID | BX_IA_CMP_EDID | BX_IA_CMP_EDSIB => {
-                let immediate = unsafe { opcode::instr_imm32(ins) };
-                self.trace.immediates.insert(immediate as u64);
-            }
-            BX_IA_CMP_AXIW | BX_IA_CMP_EWIW | BX_IA_CMP_EWSIB => {
-                let immediate = unsafe { opcode::instr_imm16(ins) };
-                self.trace.immediates.insert(immediate as u64);
-            }
-            _ => {
-                // println!("unknown opcode {:x}", op);
+        if let Some(trace) = self.trace.as_mut() {
+
+            match op {
+                BX_IA_CMP_RAXID | BX_IA_CMP_EQID | BX_IA_CMP_EQSIB => {
+                    let immediate = unsafe { opcode::instr_imm64(ins) };
+                    trace.immediates.insert(immediate);
+                }
+                BX_IA_CMP_EAXID | BX_IA_CMP_EDID | BX_IA_CMP_EDSIB => {
+                    let immediate = unsafe { opcode::instr_imm32(ins) };
+                    trace.immediates.insert(immediate as u64);
+                }
+                BX_IA_CMP_AXIW | BX_IA_CMP_EWIW | BX_IA_CMP_EWSIB => {
+                    let immediate = unsafe { opcode::instr_imm16(ins) };
+                    trace.immediates.insert(immediate as u64);
+                }
+                _ => {
+                    // println!("unknown opcode {:x}", op);
+                }
             }
         }
     }
@@ -139,50 +142,39 @@ impl <'a> hook::Hooks for BochsHooks <'a>{
         let cpu = Cpu::from(cpu_id);
         let rip = unsafe { cpu.rip() };
 
-        // sometime before execution is called twice, making traces completly false ...
-        if self.params.save_context {
-            let context: LocalContext = unsafe { cpu.state().into() };
-            let context = context.0;
-            self.queue.push((ins, rip, Some(context)));
-        } else {
-            self.queue.push((ins, rip, None));
-        }
+        if let (Some(trace), Some(params)) = (self.trace.as_mut(), self.params.as_ref()) {
 
-        if rip == self.params.return_address {
-            trace!("found return address");
-            self.trace.status = EmulationStatus::Success;
-            unsafe { cpu.set_run_state(RunState::Stop) };
-        }
+            // sometime before execution is called twice, making traces completly false ...
+            if params.save_context {
+                let context: LocalContext = unsafe { cpu.state().into() };
+                let context = context.0;
+                self.queue.push((ins, rip, Some(context)));
+            } else {
+                self.queue.push((ins, rip, None));
+            }
 
-        for (k, &v) in self.params.excluded_addresses.iter() {
-            if v == rip {
-                let msg = format!("found excluded address {}", k);
-                self.trace.status = EmulationStatus::ForbiddenAddress(msg);
+            if rip == params.return_address {
+                trace!("found return address");
+                trace.status = EmulationStatus::Success;
                 unsafe { cpu.set_run_state(RunState::Stop) };
             }
-        }
 
-        self.trace.seen.insert(rip);
-        // if rip == 0xfffff8024b48fe2f {
-        //     println!("skipping CfgReg_SaveRoot");
-        //     unsafe {
-        //         cpu.set_rax(0);
-        //         cpu.set_rip(rip + 5);
-        //     }
-        // }
-
-        // if rip == 0xfffff8024b48fe46 {
-        //     println!("skipping CfgReg_Refresh");
-        //     unsafe {
-        //         cpu.set_rip(rip + 5);
-        //     }
-        // }
-
-        if !self.singlestep {
-            for &v in self.breakpoints.iter() {
+            for (k, &v) in params.excluded_addresses.iter() {
                 if v == rip {
-                    self.trace.status = EmulationStatus::Breakpoint;
+                    let msg = format!("found excluded address {}", k);
+                    trace.status = EmulationStatus::ForbiddenAddress(msg);
                     unsafe { cpu.set_run_state(RunState::Stop) };
+                }
+            }
+
+            trace.seen.insert(rip);
+
+            if !self.singlestep {
+                for &v in self.breakpoints.iter() {
+                    if v == rip {
+                        trace.status = EmulationStatus::Breakpoint;
+                        unsafe { cpu.set_run_state(RunState::Stop) };
+                    }
                 }
             }
         }
@@ -191,23 +183,25 @@ impl <'a> hook::Hooks for BochsHooks <'a>{
     fn after_execution(&mut self, cpu_id: u32, ins: *mut std::ffi::c_void) {
         // trace!("after {:?}", _ins);
 
-        if let Some((a, b, c)) = self.queue.pop() {
-            if a == ins {
-                self.trace.coverage.push((b, c));
-                self.instructions_count += 1;
+        if let (Some(trace), Some(params)) = (self.trace.as_mut(), self.params.as_ref()) {
+            if let Some((a, b, c)) = self.queue.pop() {
+                if a == ins {
+                    trace.coverage.push((b, c));
+                    self.instructions_count += 1;
+                }
             }
-        }
 
-        let cpu = Cpu::from(cpu_id);
+            let cpu = Cpu::from(cpu_id);
 
-        if self.singlestep {
-            self.trace.status = EmulationStatus::SingleStep;
-            unsafe { cpu.set_run_state(RunState::Stop) };
-        }
-        if self.params.limit != 0 && self.instructions_count > self.params.limit {
-            warn!("limit exceeded");
-            self.trace.status = EmulationStatus::LimitExceeded;
-            unsafe { cpu.set_run_state(RunState::Stop) };
+            if self.singlestep {
+                trace.status = EmulationStatus::SingleStep;
+                unsafe { cpu.set_run_state(RunState::Stop) };
+            }
+            if params.limit != 0 && self.instructions_count > params.limit {
+                warn!("limit exceeded");
+                trace.status = EmulationStatus::LimitExceeded;
+                unsafe { cpu.set_run_state(RunState::Stop) };
+            }
         }
     }
 
@@ -233,13 +227,15 @@ impl <'a> hook::Hooks for BochsHooks <'a>{
 
         // FIXME: push type
         // FIXME: need to push rip
-        let access = format!("{:?}", rw);
-        self.trace.mem_access.push((rip, vaddr, gpa, len, access));
-        match rw {
-            hook::MemAccess::Write | hook::MemAccess::RW => {
-                self.dirty.insert(gpa & !0xfff);
-            },
-            _ => (),
+        if let Some(trace) = self.trace.as_mut() {
+            let access = format!("{:?}", rw);
+            trace.mem_access.push((rip, vaddr, gpa, len, access));
+            match rw {
+                hook::MemAccess::Write | hook::MemAccess::RW => {
+                    self.dirty.insert(gpa & !0xfff);
+                },
+                _ => (),
+            }
         }
     }
 
@@ -255,93 +251,75 @@ impl <'a> hook::Hooks for BochsHooks <'a>{
     // fn wrmsr(&mut self, _id: u32, _msr: u32, _val: u64) {}
 
     // fn vmexit(&mut self, _id: u32, _reason: u32, _qualification: u64) {}
+
+    fn missing_page(&mut self, paddr: bochscpu::Address) {
+        let base = paddr & !0xfff;
+        let pages: usize = self.allocator.allocate_physical_memory(0x1000);
+
+        let slice: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(pages as *mut u8, 0x1000) };
+
+        match self.snapshot.read_gpa(base, slice) {
+            Ok(_) => {
+                unsafe { guest_mem::page_insert(base, pages as *mut u8) };
+            },
+            _ => {
+                println!("can't find page in dump");
+                let cpu = Cpu::from(0);
+                unsafe { cpu.set_run_state(RunState::Stop) };
+            }
+        };
+
+    }
 }
 
-impl <'a> BochsHooks <'a> {
+impl <'a, S: Snapshot> BochsHooks <'a, S> {
 
-    fn new(params: &'a Params, trace: &'a mut Trace) -> Self {
+    fn new(snapshot: &'a S) -> Self {
         Self {
             singlestep: false,
-            // excluded_addresses: HashMap::new(),
-            // return_address: return_address,
             instructions_count: 0,
-            // limit: limit,
-            // coverage: Vec::new(),
             dirty: BTreeSet::new(),
-            // seen: BTreeSet::new(),
             breakpoints: BTreeSet::new(),
-            // save_context: false,
-            // status: EmulationStatus::Success,
             queue: Vec::new(),
-            params,
-            trace,
+            params: None,
+            trace: None,
+            allocator: mem::Allocator::new(),
+            snapshot,
         }
     }
 
 }
 
-
-pub struct BochsTracer <S: 'static + Snapshot> {
-    pub snapshot: &'static S,
+        
+pub struct BochsTracer <'a, S: Snapshot> {
+    hooks: BochsHooks<'a, S>,
     pub breakpoints: BTreeSet<u64>,
     dirty: BTreeSet<u64>,
 
 }
 
-impl <S: 'static + Snapshot> BochsTracer <S> {
+impl <'a, S: Snapshot> BochsTracer <'a, S> {
 
-    pub fn new(snapshot: S) -> Result<Self> {
+    pub fn new(snapshot: &'a S) -> Self {
 
         unsafe { Cpu::new(0) };
+        
+        let hooks = BochsHooks::new(snapshot);
 
-        // FIXME: use drop to remove leak
-        let static_ref: &'static S = Box::leak(Box::new(snapshot));
-        let tracer = BochsTracer {
-            snapshot: static_ref,
+        Self {
+            hooks,
             breakpoints: BTreeSet::new(),
             dirty: BTreeSet::new(),
-        };
-
-        let mut allocator = mem::Allocator::new();
-
-        unsafe {
-
-            guest_mem::missing_page( move |paddr| {
-                let base = paddr & !0xfff;
-                let pages: usize = allocator.allocate_physical_memory(0x1000);
-
-                let slice: &mut [u8] = std::slice::from_raw_parts_mut(pages as *mut u8, 0x1000);
-
-                match static_ref.read_gpa(base, slice) {
-                    Ok(_) => {
-                        guest_mem::page_insert(base, pages as *mut u8);
-                    },
-                    _ => {
-                        warn!("can't find page in dump");
-                        let cpu = Cpu::from(0);
-                        cpu.set_run_state(RunState::Stop);
-                    }
-                };
-            });
         }
 
-        Ok(tracer)
     }
-
-    pub fn read_gpa(&self, address: u64, data: &mut[u8]) -> Result<()> {
-        guest_mem::phy_read_slice(address, data);
-
-        Ok(())
-
-    }
-
 
 
 }
 
-impl <S: Snapshot> Tracer for BochsTracer <S> {
+impl <'a, S: Snapshot> Tracer for BochsTracer <'a, S> {
 
-    fn get_state(&mut self) -> Result<ProcessorState> {
+    fn get_state(&mut self) -> Result<ProcessorState, TracerError> {
         let c = Cpu::from(0);
         let mut state = ProcessorState::default();
 
@@ -413,7 +391,7 @@ impl <S: Snapshot> Tracer for BochsTracer <S> {
 
     }
 
-    fn set_state(&mut self, context: &ProcessorState) -> Result<()> {
+    fn set_state(&mut self, context: &ProcessorState) -> Result<(), TracerError> {
         let c = Cpu::from(0);
 
         let gdt = GlobalSeg {
@@ -505,9 +483,9 @@ impl <S: Snapshot> Tracer for BochsTracer <S> {
             c.set_gdtr(gdt);
             c.set_idtr(idt);
 
-            c.set_cr0(context.cr0.try_into()?);
+            c.set_cr0(context.cr0.try_into().map_err(|_| TracerError::UnknownError("bad cr0 value".into()))?);
             c.set_cr3(context.cr3);
-            c.set_cr4(context.cr4.try_into()?);
+            c.set_cr4(context.cr4.try_into().map_err(|_| TracerError::UnknownError("bad cr4 value".into()))?);
             c.set_cr8(context.cr8);
             // c.set_xcr0(0x1f);
 
@@ -515,7 +493,7 @@ impl <S: Snapshot> Tracer for BochsTracer <S> {
             c.set_sysenter_cs(context.sysenter_cs);
             c.set_sysenter_esp(context.sysenter_esp);
             c.set_sysenter_eip(context.sysenter_eip);
-            c.set_efer(context.efer.try_into()?);
+            c.set_efer(context.efer.try_into().map_err(|_| TracerError::UnknownError("bad efer value".into()))?);
             c.set_star(context.star);
             c.set_lstar(context.lstar);
             c.set_cstar(context.cstar);
@@ -530,29 +508,40 @@ impl <S: Snapshot> Tracer for BochsTracer <S> {
 
     }
 
-    fn run<H: trace::Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace> {
-
+    fn run<H: trace::Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace, TracerError> {
         let c = Cpu::from(0);
         let start = Instant::now();
 
-        let mut trace = Trace::new();
-        let mut hooks = BochsHooks::new(params, &mut trace);
+        self.hooks.trace = Some(Trace::new());
 
-        let run = unsafe { c.prepare().register(&mut hooks) };
+        // FIXME: need to work around lifetime issues
+        self.hooks.params = Some(Params::default());
+        if let Some(p) = self.hooks.params.as_mut() {
+            p.return_address = params.return_address;
+            p.save_context = params.save_context;
+            p.max_duration = params.max_duration;
+            p.coverage_mode = params.coverage_mode.clone();
+            p.excluded_addresses = params.excluded_addresses.clone();
+            p.limit = params.limit;
+            p.save_instructions = params.save_instructions;
+        }
+
         hook.setup(self);
 
+        let run = unsafe { c.prepare().register(&mut self.hooks) };
         loop {
 
-            hooks.breakpoints.extend(self.breakpoints.iter());
-            unsafe { run.run() };
-            match hooks.trace.status {
+            self.hooks.breakpoints.extend(self.breakpoints.iter());
+            unsafe { run.run() }; 
+
+            match self.hooks.trace.as_ref().unwrap().status {
                 EmulationStatus::Breakpoint => {
                     hook.handle_breakpoint(self)?;
-                    hooks.singlestep = true;
+                    self.hooks.singlestep = true;
 
                 },
                 EmulationStatus::SingleStep => {
-                    hooks.singlestep = false;
+                    self.hooks.singlestep = false;
                 },
                 _ => {
                     break
@@ -560,29 +549,26 @@ impl <S: Snapshot> Tracer for BochsTracer <S> {
             }
         }   
 
-        hook.handle_trace(hooks.trace)?;
+        let mut trace = self.hooks.trace.take().unwrap();
+        hook.handle_trace(&mut trace)?;
 
         let end = Instant::now();
 
-        self.dirty.append(&mut hooks.dirty);
+        self.dirty.append(&mut self.hooks.dirty);
         trace.start = Some(start);
         trace.end = Some(end);
-
-        // FIXME: false, need a way to have only new pages, boarf to improve ...
-        trace.code = unsafe { guest_mem::mem().len() };
-
         Ok(trace)
 
     }
 
-    fn restore_snapshot(&mut self) -> Result<usize> {
+    fn restore_snapshot(&mut self) -> Result<usize, TracerError> {
         for page in &self.dirty {
             let buffer = unsafe { guest_mem::mem().get(page) };
             
             match buffer {
                 Some(&buffer) => {
                     let slice: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(buffer as *mut u8, 0x1000) };
-                    match self.snapshot.read_gpa(*page, slice) {
+                    match self.hooks.snapshot.read_gpa(*page, slice) {
                         Ok(_) => {
                             trace!("restored page {:x}", page)
                         },
@@ -604,31 +590,37 @@ impl <S: Snapshot> Tracer for BochsTracer <S> {
         Ok(pages)
     }
 
-    fn read_gva(&mut self, cr3: u64, vaddr: u64, data: &mut [u8]) -> Result<()> {
-        guest_mem::virt_read_slice_checked(cr3, vaddr, data)?;
+    fn read_gva(&mut self, cr3: u64, vaddr: u64, data: &mut [u8]) -> Result<(), TracerError> {
+        // needed because hooks are removed when run is dropped 
+        let c = Cpu::from(0);
+        let _run = unsafe { c.prepare().register(&mut self.hooks) };
+        guest_mem::virt_read_slice_checked(cr3, vaddr, data)
+            .map_err(|e| TracerError::UnknownError(e.to_string()))?;
         Ok(())
     }
 
-    fn write_gva(&mut self, cr3: u64, vaddr: u64, data: &[u8]) -> Result<()> {
-        guest_mem::virt_write_checked(cr3, vaddr, data)?;
+    fn write_gva(&mut self, cr3: u64, vaddr: u64, data: &[u8]) -> Result<(), TracerError> {
+        let c = Cpu::from(0);
+        let _run = unsafe { c.prepare().register(&mut self.hooks) };
+        guest_mem::virt_write_checked(cr3, vaddr, data)
+            .map_err(|e| TracerError::UnknownError(e.to_string())) ?;
         Ok(())
     }
 
-    fn cr3(&mut self) -> Result<u64> {
+    fn cr3(&mut self) -> Result<u64, TracerError> {
         let c = Cpu::from(0);
         Ok(unsafe { c.cr3() })
     }
 
-    fn singlestep<H: trace::Hook>(&mut self, params: &Params, _hook: &mut H) -> Result<Trace> {
+    fn singlestep<H: trace::Hook>(&mut self, _params: &Params, _hook: &mut H) -> Result<Trace, TracerError> {
         let c = Cpu::from(0);
         // let start = Instant::now();
 
-        let mut trace: Trace = Trace::new();
-        let mut hooks = BochsHooks::new(params, &mut trace);
-        hooks.singlestep = true;
-        hooks.breakpoints.extend(self.breakpoints.iter());
+        let trace: Trace = Trace::new();
+        self.hooks.singlestep = true;
+        self.hooks.breakpoints.extend(self.breakpoints.iter());
  
-        unsafe { c.prepare().register(&mut hooks).run() };
+        unsafe { c.prepare().run() };
 
         // trace!("executed {} instructions ({}) in {:?}", hooks.instructions_count, hooks.coverage.len(), start.elapsed());
         // trace!("seen {} unique addresses, dirty pages {}", hooks.seen.len(), hooks.dirty.len());
@@ -642,18 +634,153 @@ impl <S: Snapshot> Tracer for BochsTracer <S> {
 
     }
 
+    fn get_mapped_pages(&self) -> Result<usize, TracerError> {
+        Ok(unsafe { guest_mem::mem().len() })
+    }
+
 }
 
-impl <S: Snapshot> mem::X64VirtualAddressSpace for BochsTracer <S> {
+impl <'a, S: Snapshot> mem::X64VirtualAddressSpace for BochsTracer <'a, S> {
 
-    fn read_gpa(&self, address: u64, data: &mut[u8]) -> Result<()> {
+    fn read_gpa(&self, address: u64, data: &mut[u8]) -> Result<(), VirtMemError> {
         guest_mem::phy_read_slice(address, data);
         Ok(())
     }
 
-    fn write_gpa(&mut self, address: u64, data: &[u8]) -> Result<()> {
+    fn write_gpa(&mut self, address: u64, data: &[u8]) -> Result<(), VirtMemError> {
         guest_mem::phy_write(address, data);
         Ok(())
     }
+
+}
+
+#[cfg(test)]
+mod test {
+    use mem::X64VirtualAddressSpace;
+
+    use super::*;
+
+    use std::io::Read;
+
+    #[derive(Default)]
+    struct TestHook {
+
+    }
+
+    impl trace::Hook for TestHook {
+        fn setup<T: trace::Tracer>(&self, _tracer: &mut T) {
+
+        }
+
+        fn handle_breakpoint<T: trace::Tracer>(&mut self, _tracer: &mut T) -> Result<bool, trace::TracerError> {
+            todo!()
+        }
+
+        fn handle_trace(&self, _trace: &mut trace::Trace) -> Result<bool, trace::TracerError> {
+            Ok(true)
+        }
+    }
+
+    #[derive(Default)]
+    struct TestSnapshot {
+
+    }
+
+    impl Snapshot for TestSnapshot {
+
+        fn read_gpa(&self, gpa: u64, buffer: &mut [u8]) -> Result<(), rewind_core::snapshot::SnapshotError> {
+            let base = gpa & !0xfff;
+            let offset = (gpa & 0xfff) as usize;
+
+            let mut data = vec![0u8; 0x1000];
+            let path = std::path::PathBuf::from(format!("../tests/sdb/mem/{:016x}.bin", base));
+            let mut fp = std::fs::File::open(path).unwrap();
+            fp.read_exact(&mut data).unwrap();
+            buffer.copy_from_slice(&data[offset..offset+buffer.len()]);
+            Ok(())
+        }
+
+    }
+
+    impl X64VirtualAddressSpace for TestSnapshot {
+
+        fn read_gpa(&self, gpa: mem::Gpa, buf: &mut [u8]) -> Result<(), mem::VirtMemError> {
+            Snapshot::read_gpa(self, gpa, buf).map_err(|_e| mem::VirtMemError::MissingPage(gpa))
+        }
+
+        fn write_gpa(&mut self, _gpa: mem::Gpa, _data: &[u8]) -> Result<(), mem::VirtMemError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_tracer() {
+
+        let path = std::path::PathBuf::from("../tests/sdb");
+        let snapshot = TestSnapshot::default();
+
+        let mut tracer = BochsTracer::new(&snapshot);
+        let context = trace::ProcessorState::load(path.join("context.json")).unwrap();
+        let mut params = trace::Params::default();
+        params.return_address = snapshot.read_gva_u64(context.cr3, context.rsp).unwrap();
+        params.save_context = true;
+
+        let mut hook = TestHook::default();
+
+        tracer.set_state(&context).unwrap();
+        let trace = tracer.run(&params, &mut hook).unwrap();
+
+        let expected = Trace::load(path.join("trace.json")).unwrap();
+
+        for (index, (addr, context)) in expected.coverage.iter().enumerate() {
+            assert_eq!(*addr, trace.coverage[index].0);
+            if let Some(context) = context {
+                let expected_context = trace.coverage[index].1.as_ref().unwrap();
+                // rflags are different so they are not tested
+                assert_eq!(context.rax, expected_context.rax);
+                assert_eq!(context.rbx, expected_context.rbx);
+                assert_eq!(context.rcx, expected_context.rcx);
+                assert_eq!(context.rdx, expected_context.rdx);
+                assert_eq!(context.rsi, expected_context.rsi);
+                assert_eq!(context.rdi, expected_context.rdi);
+                assert_eq!(context.rsp, expected_context.rsp);
+                assert_eq!(context.rbp, expected_context.rbp);
+                assert_eq!(context.r8, expected_context.r8);
+                assert_eq!(context.r9, expected_context.r9);
+                assert_eq!(context.r10, expected_context.r10);
+                assert_eq!(context.r11, expected_context.r11);
+                assert_eq!(context.r12, expected_context.r12);
+                assert_eq!(context.r13, expected_context.r13);
+                assert_eq!(context.r14, expected_context.r14);
+                assert_eq!(context.r15, expected_context.r15);
+                assert_eq!(context.rip, expected_context.rip);
+                assert_eq!(*addr, expected_context.rip);
+
+            }
+
+            assert_eq!(expected.seen.contains(addr), true);
+            assert_eq!(trace.seen.contains(addr), true);
+
+        }
+
+        assert_eq!(trace.seen.len(), 2913);
+        assert_eq!(trace.coverage.len(), 59120);
+        assert_eq!(trace.immediates.len(), 22);
+        assert_eq!(trace.mem_access.len(), 16650);
+
+        assert_eq!(trace.status, trace::EmulationStatus::Success);
+
+        assert_eq!(trace.coverage[0].0, context.rip);
+
+        let state = tracer.get_state().unwrap();
+
+        assert_eq!(state.rip, params.return_address);
+
+        let pages = tracer.get_mapped_pages().unwrap();
+
+        assert_eq!(pages, 80);
+
+    }
+
 
 }

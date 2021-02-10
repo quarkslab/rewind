@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time;
 
+use mem::VirtMemError;
 use whvp_sys::*;
 
 use rewind_core::mem;
@@ -83,19 +84,13 @@ impl From<WHV_X64_VP_EXECUTION_STATE> for ExecutionState {
 }
 
 #[allow(non_snake_case)]
-#[derive(Copy, Clone, CustomDebug, Hash, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 pub struct VpContext {
-    #[debug(skip)]
     pub ExecutionState: ExecutionState,
-    #[debug(skip)]
     pub InstructionLength: usize,
-    #[debug(skip)]
     pub Cr8: u8,
-    #[debug(skip)]
     pub Cs: SegmentRegister,
-    #[debug(format = "{:016x}")]
     pub Rip: u64,
-    #[debug(format = "{:016x}")]
     pub Rflags: u64,
 }
 
@@ -232,14 +227,11 @@ impl From<WHV_MEMORY_ACCESS_INFO> for MemoryAccessInfo {
 }
 
 #[allow(non_snake_case)]
-#[derive(Clone, CustomDebug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct MemoryAccessContext {
-    #[debug(skip)]
     pub InstructionBytes: [u8; 16],
     pub AccessInfo: MemoryAccessInfo,
-    #[debug(format = "{:016x}")]
     pub Gpa: GuestPhysicalAddress,
-    #[debug(format = "{:016x}")]
     pub Gva: GuestVirtualAddress,
 }
 
@@ -370,7 +362,7 @@ impl From<WHV_X64_UNSUPPORTED_FEATURE_CODE> for UnsupportedFeatureCode {
             WHV_X64_UNSUPPORTED_FEATURE_CODE_WHvUnsupportedFeatureTaskSwitchTss => {
                 UnsupportedFeatureCode::TaskSwitchTss
             }
-            _ => panic!("unknown UnsupportedFeatureCode varient when contstructing enum"),
+            _ => panic!("unknown UnsupportedFeatureCode varient when constructing enum"),
         }
     }
 }
@@ -409,7 +401,7 @@ impl From<WHV_X64_PENDING_INTERRUPTION_TYPE> for PendingInterruptionType {
             WHV_X64_PENDING_INTERRUPTION_TYPE_WHvX64PendingException => {
                 PendingInterruptionType::Exception
             }
-            _ => panic!("unknown PendingInterruptionType variant when contructing enum"),
+            _ => panic!("unknown PendingInterruptionType variant when constructing enum"),
         }
     }
 }
@@ -493,16 +485,12 @@ impl From<WHV_X64_CPUID_ACCESS_CONTEXT> for CpuidAccessContext {
 }
 
 #[allow(non_snake_case)]
-#[derive(Clone, CustomDebug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct ExceptionContext {
-    #[debug(skip)]
     pub InstructionBytes: [u8; 16],
-    #[debug(skip)]
     pub SoftwareException: bool,
     pub ExceptionType: u8,
-    #[debug(skip)]
     pub ErrorCode: Option<u32>,
-    #[debug(skip)]
     pub ExceptionParameter: u64,
 }
 
@@ -867,12 +855,12 @@ impl Partition {
             )
         };
         match hr {
-            0 => return Ok(()),
+            0 => { Ok(()) },
             _ => {
                 let msg = format!("WHvSetPartitionProperty failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     fn set_extended_vm_exits(&mut self) -> Result<(), PartitionError> {
@@ -891,12 +879,12 @@ impl Partition {
             )
         };
         match hr {
-            0 => return Ok(()),
+            0 => { Ok(()) },
             _ => {
                 let msg = format!("WHvSetPartitionProperty failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     fn set_exception_bitmap(&mut self, bitmap: u64) -> Result<(), PartitionError> {
@@ -909,23 +897,23 @@ impl Partition {
             )
         };
         match hr {
-            0 => return Ok(()),
+            0 => Ok(()),
             _ => {
                 let msg = format!("WHvSetPartitionProperty failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     fn setup_partition(&mut self) -> Result<(), PartitionError> {
         let hr = unsafe { WHvSetupPartition(self.handle) };
         match hr {
-            0 => return Ok(()),
+            0 => Ok(()),
             _ => {
                 let msg = format!("WHvSetupPartition failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     fn create_processor(&mut self) -> Result<(), PartitionError> {
@@ -933,13 +921,13 @@ impl Partition {
         match hr {
             0 => {
                 self.virtual_processors.push(0);
-                return Ok(());
+                Ok(())
             }
             _ => {
                 let msg = format!("WHvCreateVirtualProcessor failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     // FIXME: overkill to get full context, need another way
@@ -957,12 +945,12 @@ impl Partition {
         };
 
         match hr {
-            0 => return Ok(context),
+            0 => Ok(context),
             _ => {
                 let msg = format!("WHvGetVirtualProcessorRegisters failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     pub fn set_regs(&mut self, context: &PartitionContext) -> Result<(), PartitionError> {
@@ -977,12 +965,12 @@ impl Partition {
         };
 
         match hr {
-            0 => return Ok(()),
+            0 => Ok(()),
             _ => {
                 let msg = format!("WHvSetVirtualProcessorRegisters failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     pub fn map_physical_memory(
@@ -1009,13 +997,13 @@ impl Partition {
                     addr: buffer,
                 };
                 self.mapped_regions.push(region);
-                return Ok(());
+                Ok(())
             }
             _ => {
                 let msg = format!("WHvMapGpaRange failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     pub fn unmap_physical_memory(
@@ -1032,13 +1020,13 @@ impl Partition {
                         && region.base <= addr + size
                         && addr + size <= region.base + region.size)
                 });
-                return Ok(());
+                Ok(())
             }
             _ => {
                 let msg = format!("WHvUnmapGpaRange failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     pub fn query_gpa_range(&mut self, addr: usize, size: usize) -> Result<u64, PartitionError> {
@@ -1053,25 +1041,25 @@ impl Partition {
             )
         };
         match hr {
-            0 => return Ok(bitmap),
+            0 => Ok(bitmap),
             _ => {
                 let msg = format!("WHvQueryGpaRangeDirtyBitmap failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     pub fn flush_gpa_range(&mut self, addr: usize, size: usize) -> Result<(), PartitionError> {
         let hr = unsafe {
-            WHvQueryGpaRangeDirtyBitmap(self.handle, addr as u64, size as u64, 0 as *mut u64, 0)
+            WHvQueryGpaRangeDirtyBitmap(self.handle, addr as u64, size as u64, std::ptr::null_mut::<u64>(), 0)
         };
         match hr {
-            0 => return Ok(()),
+            0 => Ok(()),
             _ => {
                 let msg = format!("WHvQueryGpaRangeDirtyBitmap failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     pub fn read_physical_memory(&self, addr: usize, size: usize) -> Result<&[u8], PartitionError> {
@@ -1082,11 +1070,11 @@ impl Partition {
                 let offset = addr - region.base;
                 let region_addr = region.addr + offset;
                 let slice: &[u8] = unsafe { from_raw_parts_mut(region_addr as *mut u8, size) };
-                return Ok(slice);
+                Ok(slice)
             }
             None => {
-                let msg = format!("can't find region");
-                return Err(PartitionError::new(msg));
+                let msg = format!("can't find region {:x}", addr);
+                Err(PartitionError::new(msg))
             }
         }
     }
@@ -1109,21 +1097,18 @@ impl Partition {
 
                 let size = min(data.len() - pos, remaining_region_size);
                 slice[offset..offset + size].copy_from_slice(&data[pos..pos + size]);
-                return Ok(size);
+                Ok(size)
             }
             None => {
-                let msg = format!("can't find region");
-                return Err(PartitionError::new(msg));
+                let msg = format!("can't find region {:x}", addr);
+                Err(PartitionError::new(msg))
             }
         }
     }
 
     pub fn is_physical_memory_valid(&mut self, addr: usize, size: usize) -> bool {
         let region = self.get_region(addr, size);
-        match region {
-            Some(_) => return true,
-            None => return false,
-        }
+        region.is_some()
     }
 
     fn get_region(&self, addr: usize, size: usize) -> Option<&MemoryRegion> {
@@ -1152,17 +1137,17 @@ impl Partition {
         };
         match hr {
             0 => match result.ResultCode {
-                WHV_TRANSLATE_GVA_RESULT_CODE_WHvTranslateGvaResultSuccess => return Ok(gpa),
+                WHV_TRANSLATE_GVA_RESULT_CODE_WHvTranslateGvaResultSuccess => Ok(gpa),
                 _ => {
                     let msg = format!("WHvTranslateGva failed: code {:#x}", result.ResultCode);
-                    return Err(PartitionError::new(msg));
+                    Err(PartitionError::new(msg))
                 }
             },
             _ => {
                 let msg = format!("WHvTranslateGva failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 
     pub fn run(&mut self) -> Result<WHV_RUN_VP_EXIT_CONTEXT, PartitionError> {
@@ -1178,33 +1163,36 @@ impl Partition {
         };
         KEEP_ALIVE_THREAD_ACTIVE.store(0, Ordering::SeqCst);
         match hr {
-            0 => return Ok(exit_context),
+            0 => Ok(exit_context),
             _ => {
                 let msg = format!("WHvRunVirtualProcessor failed with {:#x}", hr);
-                return Err(PartitionError::new(msg));
+                Err(PartitionError::new(msg))
             }
-        };
+        }
     }
 }
 
 impl mem::X64VirtualAddressSpace for Partition {
-    fn read_gpa(&self, gpa: mem::Gpa, buf: &mut [u8]) -> anyhow::Result<()> {
+    fn read_gpa(&self, gpa: mem::Gpa, buf: &mut [u8]) -> Result<(), VirtMemError> {
         let (_base, _off) = mem::page_off(gpa);
         let data = self.read_physical_memory(gpa as usize, buf.len());
         match data {
-            Ok(arr) => return Ok(buf.copy_from_slice(&arr[..buf.len()])),
-            Err(e) => return Err(anyhow!("{:?}: {:x} {:x}", e, gpa, buf.len()))
+            Ok(arr) => {
+                buf.copy_from_slice(&arr[..buf.len()]);
+                Ok(())
+            }
+            Err(e) => Err(VirtMemError::GenericError(e.to_string()))
             // mem::VirtMemError::MissingPage(base))),
         }
     }
 
-    fn write_gpa(&mut self, gpa: mem::Gpa, data: &[u8]) -> anyhow::Result<()> {
+    fn write_gpa(&mut self, gpa: mem::Gpa, data: &[u8]) -> Result<(), VirtMemError> {
         let (base, _off) = mem::page_off(gpa);
         let result = self.write_physical_memory(gpa as usize, data);
 
         match result {
             Ok(_size) => Ok(()),
-            _ => return Err(anyhow!(mem::VirtMemError::MissingPage(base))),
+            _ => Err(mem::VirtMemError::MissingPage(base)),
         }
     }
 }
@@ -1261,12 +1249,12 @@ pub fn create_partition() -> Result<WHV_PARTITION_HANDLE, PartitionError> {
     let mut partition: WHV_PARTITION_HANDLE = null_mut();
     let hr = unsafe { WHvCreatePartition(&mut partition) };
     match hr {
-        0 => return Ok(partition),
+        0 => Ok(partition),
         _ => {
             let msg = format!("WHvCreatePartition failed with {:#x}", hr);
-            return Err(PartitionError::new(msg));
+            Err(PartitionError::new(msg))
         }
-    };
+    }
 }
 
 pub fn set_dr7(mut dr7: u64, slot: u8) -> u64 {
@@ -1292,7 +1280,7 @@ pub fn clear_dr7(mut dr7: u64, slot: u8) -> u64 {
     dr7
 }
 
-pub fn set_hw_breakpoint(context: &mut PartitionContext, address: u64) -> () {
+pub fn set_hw_breakpoint(context: &mut PartitionContext, address: u64) {
     let slot = 0;
     context.dr0.Reg64 = address;
     let dr7 = unsafe { context.dr7.Reg64 };

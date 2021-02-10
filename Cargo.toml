@@ -1,0 +1,15 @@
+[workspace]
+
+members = [
+    "rewind-core",
+    "rewind-snapshot",
+    "rewind-whvp",
+    "rewind-bochs",
+    "rewind-system",
+    "rewind-tui",
+    "rewind-cli",
+]
+
+exclude = [
+    "vendor/bochscpu",
+]

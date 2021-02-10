@@ -21,10 +21,9 @@ use serde::{Serialize, Deserialize};
 
 use chrono::{Utc, DateTime};
 
-// use anyhow::Result;
 use thiserror::Error;
 
-use crate::trace;
+use crate::{mutation::MutationHint, trace};
 use crate::watch;
 use crate::error;
 
@@ -40,6 +39,7 @@ pub struct Stats {
     pub corpus_size: usize,
     pub crashes: u64,
     pub uuid: uuid::Uuid,
+    pub done: bool,
 }
 
 impl Stats {
@@ -55,6 +55,7 @@ impl Stats {
             corpus_size: 0,
             crashes: 0,
             uuid,
+            done: false
         }
     }
 
@@ -96,10 +97,10 @@ impl std::fmt::Display for Stats {
 
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let elapsed = Utc::now() - self.start;
-        write!(f, "{:?}, {} executions, {} exec/s, coverage {}, mapped pages {}, corpus {}, crashes {}",
-            elapsed,
+        let num_seconds = std::cmp::max(1, elapsed.num_seconds());
+        write!(f, "{} executions, {} exec/s, coverage {}, mapped pages {}, corpus {}, crashes {}",
             self.iterations,
-            self.iterations / elapsed.num_seconds() as u64,
+            self.iterations / num_seconds as u64,
             self.coverage,
             convert((self.mapped_pages * 0x1000) as f64),
             self.corpus_size,
@@ -111,8 +112,8 @@ impl From<&Params> for trace::Input {
 
     fn from(params: &Params) -> Self {
         Self {
-            address: params.input.into(),
-            size: params.input.into(),
+            address: params.input,
+            size: params.input_size,
         }
     }
 }
@@ -159,6 +160,7 @@ impl FromStr for Params {
     }
 }
 
+#[derive(Debug)]
 pub struct Corpus {
     pub workdir: std::path::PathBuf,
     pub members: HashMap<u64, Vec<u8>>,
@@ -214,11 +216,10 @@ pub fn calculate_hash<T: Hash + ?Sized>(t: &T) -> u64 {
 // FIXME: add associated error type 
 
 pub trait Strategy {
-    type Input: AsRef<[u8]>;
 
-    fn generate_new_input<'a>(&'a mut self, corpus: &mut Corpus) -> &'a Self::Input;
+    fn generate_new_input(&mut self, data: &mut [u8], corpus: &mut Corpus, hint: &mut MutationHint);
 
-    fn get_new_coverage(&mut self, params: &Params, trace: &mut trace::Trace, corpus: &mut Corpus) -> usize; 
+    fn check_new_coverage(&mut self, params: &Params, trace: &mut trace::Trace, corpus: &mut Corpus) -> usize; 
 
     fn get_coverage(&mut self) -> usize;
 
@@ -244,12 +245,13 @@ impl std::fmt::Display for FuzzerError {
 
 }
 
-pub struct Fuzzer {
+pub struct Fuzzer<'a> {
     path: std::path::PathBuf,
     channel: mpsc::Receiver<Vec<u8>>,
+    callback: Option<Box<dyn FnMut(&Stats) + 'a>>,
 }
 
-impl Fuzzer {
+impl <'a> Fuzzer <'a> {
     pub fn new<S>(path: S) -> Result<Self, FuzzerError>
     where S: Into<std::path::PathBuf> {
         let (tx, rx) = mpsc::channel();
@@ -258,6 +260,7 @@ impl Fuzzer {
         let fuzzer = Fuzzer {
             path,
             channel: rx,
+            callback: None
         };
 
         let sender = tx;
@@ -270,6 +273,10 @@ impl Fuzzer {
         });
 
         Ok(fuzzer)
+    }
+
+    pub fn callback(&mut self, callback: impl FnMut(&Stats) + 'a) {
+        self.callback = Some(Box::new(callback));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -312,20 +319,34 @@ impl Fuzzer {
 
         corpus.load()?;
 
-        loop {
-            // unsure to have this in Strategy
-            // strategy.handle_stats(self.path.as_path(), &mut stats);
+        let mut last_refresh = std::time::Instant::now();
+        let mut hint = MutationHint::default();
 
+        loop {
+            if let Some(callback) = self.callback.as_mut() {
+                callback(&stats);
+            }
+
+            if last_refresh.elapsed() > std::time::Duration::from_secs(1) {
+                let path = std::path::Path::new(&self.path).join("hints.json");
+                if let Ok(mutation_hint) = MutationHint::load(path) {
+                    hint = mutation_hint;
+                }
+
+                let path = self.path.join("instances").join(format!("{}.json", stats.uuid));
+                stats.save(path)?;
+
+                last_refresh = std::time::Instant::now()
+
+            }
+        
             if let Ok(data)  = self.channel.try_recv() {
                 corpus.add(&data)?;
             }
 
-            let new_input = strategy.generate_new_input(corpus);
-            let input = new_input.as_ref();
-            let mut data = input.to_vec();
-            // useless copy ?
+            strategy.generate_new_input(&mut data, corpus, &mut hint);
 
-            tracer.write_gva(cr3, params.input, input)?;
+            tracer.write_gva(cr3, params.input, &data[..0x1000])?;
 
             tracer.set_state(&context)?;
 
@@ -333,35 +354,33 @@ impl Fuzzer {
 
             tracer.restore_snapshot()?;
 
-            let new = strategy.get_new_coverage(&params, &mut trace, corpus);
+            let new = strategy.check_new_coverage(&params, &mut trace, corpus);
 
             if new > 0 {
                 // save corpus
-                data.resize(input_size, 0);
                 let hash = calculate_hash(&data);
                 let path = std::path::Path::new(&self.path)
                     .join("corpus")
                     .join(format!("{:x}.bin", hash));
-                println!("discovered {} new address(es), adding file {:?} to corpus", new, path);
+                // println!("discovered {} new address(es), adding file {:?} to corpus", new, path);
                 let mut file = std::fs::File::create(path)?;
                 file.write_all(&data)?;
 
-            }
+                match trace.status {
+                    trace::EmulationStatus::Success => {},
+                    _ => {
+                        let hash = calculate_hash(&data);
+                        let path = std::path::Path::new(&self.path)
+                            .join("crashes")
+                            .join(format!("{:x}.bin", hash));
+                        // println!("got abnormal exit {}, saving input to {:?}", trace.status, path);
+                        let mut file = std::fs::File::create(path)?;
+                        file.write_all(&data)?;
 
-            match trace.status {
-                trace::EmulationStatus::Success => {},
-                _ => {
-                    let hash = calculate_hash(&data);
-                    let path = std::path::Path::new(&self.path)
-                        .join("crashes")
-                        .join(format!("{:x}.bin", hash));
-                    println!("got abnormal exit {}, saving input to {:?}", trace.status, path);
-                    let mut file = std::fs::File::create(path)?;
-                    file.write_all(&data)?;
-
-                    stats.crashes += 1;
-                    if params.stop_on_crash {
-                        break;
+                        stats.crashes += 1;
+                        if params.stop_on_crash {
+                            break;
+                        }
                     }
                 }
             }
@@ -384,7 +403,11 @@ impl Fuzzer {
 
         }
 
-        // strategy.handle_stats(self.path.as_path(), &mut stats);
+        stats.done = true;
+
+        if let Some(callback) = self.callback.as_mut() {
+            callback(&stats);
+        }
 
         Ok(stats)
     }
@@ -498,10 +521,9 @@ mod test {
     }
 
     impl Strategy for TestStrategy {
-        type Input = Vec<u8>;
 
         // FIXME: should have mutation hint too
-        fn generate_new_input(&mut self, corpus: &mut Corpus) -> &Self::Input {
+        fn generate_new_input(&mut self, data: &mut [u8], corpus: &mut Corpus, _hint: &mut MutationHint) {
             let instance = corpus.members.values().nth(self.index);
             self.index = (self.index + 1) ^ corpus.members.len();
             if let Some(instance) = instance {
@@ -509,18 +531,18 @@ mod test {
                 self.mutator.input(&instance);
                 self.mutator.mutate(4);
                 assert_eq!(self.mutator.input.len(), 0x60);
-                &self.mutator.input
+                data[..self.mutator.input.len()].copy_from_slice(&self.mutator.input[..]);
             } else {
                 self.mutator.mutate(4);
                 assert_eq!(self.mutator.input.len(), 0x60);
-                &self.mutator.input
+                data[..self.mutator.input.len()].copy_from_slice(&self.mutator.input[..]);
             }
         }
 
         // FIXME: type error
         // new coverage ?
         // check new coverage ?
-        fn get_new_coverage(&mut self, _params: &Params, _trace: &mut trace::Trace, _corpus: &mut Corpus) -> usize {
+        fn check_new_coverage(&mut self, _params: &Params, _trace: &mut trace::Trace, _corpus: &mut Corpus) -> usize {
 
             let data = &self.mutator.input;
             assert_eq!(data.len(), 0x60);

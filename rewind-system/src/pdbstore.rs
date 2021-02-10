@@ -5,8 +5,6 @@ use std::io;
 // use std::io::Read;
 use std::path::PathBuf;
 
-use anyhow::Result;
-
 use thiserror::Error;
 
 use pdb::{FallibleIterator, Rva, SymbolData,PDB};
@@ -33,6 +31,17 @@ pub struct Symbol {
     pub offset: usize
 }
 
+impl std::fmt::Display for Symbol {
+
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.offset == 0 {
+            write!(f, "{}!{}", self.module, self.name)
+        } else {
+            write!(f, "{}!{}+0x{:x}", self.module, self.name, self.offset)
+        }
+    }
+}
+
 pub struct LoadedPdb {
     pub name: String,
     pub symbols: Symbols,
@@ -45,8 +54,18 @@ pub struct LoadedPdb {
 pub enum StoreError {
     #[error("error happened during server download: {0}")]
     DownloadError(String),
+
     #[error("unknown store error")]
     Unknown,
+
+    #[error("io error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("pdb error: {0}")]
+    PdbError(#[from] pdb::Error),
+
+    #[error("network error: {0}")]
+    NetworkError(#[from] reqwest::Error),
 }
 
 
@@ -57,7 +76,7 @@ pub struct PdbStore {
 
 impl PdbStore {
 
-    pub fn new<P>(path: P) -> Result<Self>
+    pub fn new<P>(path: P) -> Result<Self, StoreError>
     where P: Into<PathBuf> 
     {
         let store = Self {
@@ -68,7 +87,7 @@ impl PdbStore {
 
     }
 
-    pub fn load_pdb(&mut self, base: u64, pdbname: &str, guid: &str) -> Result<()> {
+    pub fn load_pdb(&mut self, base: u64, pdbname: &str, guid: &str) -> Result<(), StoreError> {
         let pdb_path = self.path.join("symbols").join(pdbname).join(guid).join(pdbname);
 
         // println!("path is {:?}", pdb_path);
@@ -173,9 +192,8 @@ impl PdbStore {
                 symbol.0 == name
             });
             
-            match symbol {
-                Some((_name, address)) => return Some(base + *address),
-                None => ()
+            if let Some((_name, address)) = symbol {
+                return Some(base + *address)
             }
         }
 
@@ -188,9 +206,8 @@ impl PdbStore {
                 *name == procname
             });
             
-            match procedure {
-                Some((_name, procedure)) => return Some(procedure),
-                None => ()
+            if let Some((_name, procedure)) = procedure {
+                return Some(procedure)
             }
         }
 
@@ -246,7 +263,7 @@ impl PdbStore {
         None
     }
 
-    pub fn download_pe(&self, name: &str, info: &pe::FileInformation) -> Result<()> {
+    pub fn download_pe(&self, name: &str, info: &pe::FileInformation) -> Result<(), StoreError> {
         // should return an enum with download, or already present
         // FIXME: symbol server should not be hardcoded
         let hash = format!("{:08X}{:X}", info.timestamp, info.size);
@@ -264,7 +281,7 @@ impl PdbStore {
         let status = resp.status();
         if !status.is_success() {
             let msg = format!("{} for {}", status, url);
-            return Err(StoreError::DownloadError(msg).into());
+            return Err(StoreError::DownloadError(msg));
         }
 
         std::fs::create_dir_all(&directory)?;
@@ -273,7 +290,7 @@ impl PdbStore {
         Ok(())
     }
 
-    pub fn download_pdb(&self, name: &str, guid: &str) -> Result<()> {
+    pub fn download_pdb(&self, name: &str, guid: &str) -> Result<(), StoreError> {
         // should return an enum with download, or already present
         let directory = self.path.join("symbols").join(name).join(guid);
         let outfile = directory.join(name);
@@ -289,7 +306,7 @@ impl PdbStore {
         let status = resp.status();
         if !status.is_success() {
             let msg = format!("{} for {}", status, url);
-            return Err(StoreError::DownloadError(msg).into());
+            return Err(StoreError::DownloadError(msg));
         }
 
         std::fs::create_dir_all(&directory)?;

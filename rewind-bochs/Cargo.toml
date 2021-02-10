@@ -8,8 +8,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0.28"
-custom_debug_derive = "0.4.0"
 log = { version = "0.4.8", features = ["release_max_level_info"] }
-bochscpu = { path = "vendor/bochscpu" }
+bochscpu = { path = "../vendor/bochscpu" }
 rewind-core = { path = "../rewind-core" }
 lazy_static = "1.4.0"

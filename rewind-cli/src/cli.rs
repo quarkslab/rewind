@@ -1,85 +1,88 @@
 
-use std::str::FromStr;
-use std::io::{Read, Write, stdout};
+use std::{collections::{BTreeSet, HashMap}, fmt::Write as FmtWrite};
+use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use color_eyre::{Report, eyre::{bail, Result, WrapErr}};
+
 use clap::{Clap, crate_version};
 
-use rewind_core::{fuzz,
-                  mutation,
-                  trace::{self, Tracer}};
+use memmap::MmapOptions;
+
+use rewind_core::{fuzz, mem::{X64VirtualAddressSpace, VirtMemError}, snapshot, mutation, trace::{self, Tracer, TracerError}};
 
 use rewind_snapshot::DumpSnapshot;
 
 use rewind_system::{system, pdbstore};
 
 use rewind_tui::ui;
+use trace::ProcessorState;
 
 
 use crate::helpers;
+#[allow(clippy::large_enum_variant)]
+pub enum Backend<'a, S>
+where S: snapshot::Snapshot {
 
-pub enum Backend<S>
-where S: rewind_core::snapshot::Snapshot + 'static {
-
-    Whvp(rewind_whvp::WhvpTracer<S>),
-    Bochs(rewind_bochs::BochsTracer<S>)
+    Whvp(rewind_whvp::WhvpTracer<'a, S>),
+    Bochs(rewind_bochs::BochsTracer<'a, S>)
 }
 
-impl<S> trace::Tracer for Backend<S>
-where S: rewind_core::snapshot::Snapshot + rewind_core::mem::X64VirtualAddressSpace + 'static {
+impl<'a, S> trace::Tracer for Backend<'a, S>
+where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
-    fn get_state(&mut self) -> anyhow::Result<trace::ProcessorState> {
+    fn get_state(&mut self) -> Result<trace::ProcessorState, TracerError> {
         match self {
             Self::Whvp(tracer) => tracer.get_state(),
             Self::Bochs(tracer) => tracer.get_state()
         }
     }
 
-    fn set_state(&mut self, state: &trace::ProcessorState) -> anyhow::Result<()> {
+    fn set_state(&mut self, state: &trace::ProcessorState) -> Result<(), TracerError> {
         match self {
             Self::Whvp(tracer) => tracer.set_state(state),
             Self::Bochs(tracer) => tracer.set_state(state)
         }
     }
 
-    fn run<H: trace::Hook>(&mut self, params: &trace::Params, hook: &mut H) -> anyhow::Result<trace::Trace> {
+    fn run<H: trace::Hook>(&mut self, params: &trace::Params, hook: &mut H) -> Result<trace::Trace, TracerError> {
         match self {
             Self::Whvp(tracer) => tracer.run(params, hook),
             Self::Bochs(tracer) => tracer.run(params, hook)
         }
     }
 
-    fn restore_snapshot(&mut self) -> anyhow::Result<usize> {
+    fn restore_snapshot(&mut self) -> Result<usize, TracerError> {
         match self {
             Self::Whvp(tracer) => tracer.restore_snapshot(),
             Self::Bochs(tracer) => tracer.restore_snapshot()
         }
     }
 
-    fn read_gva(&mut self, cr3: u64, vaddr: u64, data: &mut [u8]) -> anyhow::Result<()> {
+    fn read_gva(&mut self, cr3: u64, vaddr: u64, data: &mut [u8]) -> Result<(), TracerError> {
         match self {
             Self::Whvp(tracer) => tracer.read_gva(cr3, vaddr, data),
             Self::Bochs(tracer) => tracer.read_gva(cr3, vaddr, data)
         }
     }
 
-    fn write_gva(&mut self, cr3: u64, vaddr: u64, data: &[u8]) -> anyhow::Result<()> {
+    fn write_gva(&mut self, cr3: u64, vaddr: u64, data: &[u8]) -> Result<(), TracerError> {
         match self {
-            Self::Whvp(tracer) => tracer.write_gva(cr3, vaddr, data),
-            Self::Bochs(tracer) => tracer.write_gva(cr3, vaddr, data)
+            Self::Whvp(tracer) => Tracer::write_gva(tracer, cr3, vaddr, data),
+            Self::Bochs(tracer) => Tracer::write_gva(tracer, cr3, vaddr, data)
         }
     }
 
-    fn cr3(&mut self) -> anyhow::Result<u64> {
+    fn cr3(&mut self) -> Result<u64, TracerError> {
         match self {
             Self::Whvp(tracer) => tracer.cr3(),
             Self::Bochs(tracer) => tracer.cr3()
         }
     }
 
-    fn singlestep<H: trace::Hook>(&mut self, params: &trace::Params, hook: &mut H) -> anyhow::Result<trace::Trace> {
+    fn singlestep<H: trace::Hook>(&mut self, params: &trace::Params, hook: &mut H) -> Result<trace::Trace, TracerError> {
         match self {
             Self::Whvp(tracer) => tracer.singlestep(params, hook),
             Self::Bochs(tracer) => tracer.singlestep(params, hook)
@@ -94,16 +97,42 @@ where S: rewind_core::snapshot::Snapshot + rewind_core::mem::X64VirtualAddressSp
 
     }
 
+    fn get_mapped_pages(&self) -> Result<usize, TracerError> {
+        match self {
+            Self::Whvp(tracer) => tracer.get_mapped_pages(),
+            Self::Bochs(tracer) => tracer.get_mapped_pages()
+        }
+    }
+}
+
+impl<'a, S> X64VirtualAddressSpace for Backend<'a, S>
+where S: snapshot::Snapshot + X64VirtualAddressSpace {
+
+    fn read_gpa(&self, gpa: u64, buf: &mut [u8]) -> Result<(), VirtMemError> {
+        match self {
+            Self::Whvp(tracer) => tracer.read_gpa(gpa, buf),
+            Self::Bochs(tracer) => tracer.read_gpa(gpa, buf)
+        }
+    }
+
+    fn write_gpa(&mut self, gpa: u64, data: &[u8]) -> Result<(), VirtMemError> {
+        match self {
+            Self::Whvp(tracer) => tracer.write_gpa(gpa, data),
+            Self::Bochs(tracer) => tracer.write_gpa(gpa, data)
+        }
+    }
 }
 
 pub struct Rewind<H> {
     args: RewindArgs,
     progress: helpers::Progress,
-    _phantom: std::marker::PhantomData<H>
+    _marker: std::marker::PhantomData<H>
 
 }
 
-impl <HH: trace::Hook> Rewind <HH> {
+impl <H> Rewind <H>
+where H: trace::Hook + Default
+{
     pub fn parse_args() -> Self {
         let args = RewindArgs::parse();
 
@@ -112,17 +141,21 @@ impl <HH: trace::Hook> Rewind <HH> {
         Self {
             args,
             progress,
-            _phantom: std::marker::PhantomData
+            _marker: std::marker::PhantomData,
         }
     }
 
-    pub fn handle_trace_run<H: trace::Hook>(&self, args: &TracerRun, hook: &mut H) -> anyhow::Result<()>
+    pub fn handle_trace_run(&self, args: &TracerRun) -> Result<()>
     {
         let progress = self.progress.enter("Running tracer");
 
         progress.single("loading snapshot");
         let dump_path = args.snapshot.join("mem.dmp");
-        let snapshot = DumpSnapshot::new(&dump_path)?;
+
+        let fp = std::fs::File::open(&dump_path)?;
+        let buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+        let snapshot = DumpSnapshot::new(&buffer)?;
 
         let context_path = args.snapshot.join("context.json");
         let context = trace::ProcessorState::load(&context_path)?;
@@ -135,16 +168,18 @@ impl <HH: trace::Hook> Rewind <HH> {
         params.max_duration = std::time::Duration::from_secs(args.max_time);
         params.coverage_mode = args.coverage.clone();
 
+        progress.single(format!("will use {} backend", args.backend));
         let mut tracer = match args.backend {
             crate::BackendType::Bochs => {
-                Backend::Bochs(rewind_bochs::BochsTracer::new(snapshot)?)
+                Backend::Bochs(rewind_bochs::BochsTracer::new(&snapshot))
 
             },
             crate::BackendType::Whvp => {
-                Backend::Whvp(rewind_whvp::WhvpTracer::new(snapshot)?)
+                Backend::Whvp(rewind_whvp::WhvpTracer::new(&snapshot)?)
             }
         };
 
+        progress.single(format!("setting tracer initial state\n{}", &context));
         tracer.set_state(&context)?;
 
         match (&args.input, &args.data) {
@@ -159,32 +194,26 @@ impl <HH: trace::Hook> Rewind <HH> {
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer)?;
 
-                let address = input.address.into();
-                let size: u64 = input.size.into();
+                let address = input.address;
+                let size: u64 = input.size;
 
                 progress.single(format!("writing input to {:x} ({:x})", address, size));
-                match tracer.write_gva(cr3, address, &buffer) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        return Err(anyhow!("can't write fuzzer input {}", e));
-                    }
-                }
+                Tracer::write_gva(&mut tracer, cr3, address, &buffer[..0x1000]).wrap_err("can't write fuzzer input")?;
             }
             (Some(input_path), None) => {
                 let input = trace::Input::load(&input_path)?;
                 
-                let size: u64 = input.size.into();
+                let size: u64 = input.size;
                 let mut data = vec![0u8; size as usize];
 
                 let cr3 = context.cr3;
-                tracer.read_gva(cr3, input.address.into(), &mut data)?;
+                tracer.read_gva(cr3, input.address, &mut data)?;
 
-                let hash = fuzz::calculate_hash(&data);
-                let path = std::path::PathBuf::from(format!("{:x}.bin", hash));
-
-                progress.single(format!("saving input to {:?} ({:x})", path, size));
-                let mut file = std::fs::File::create(path)?;
-                file.write_all(&data)?;
+                if let Some(path) = &args.save_input {
+                    progress.single(format!("saving input to {:?} ({:x})", path, size));
+                    let mut file = std::fs::File::create(path)?;
+                    file.write_all(&data)?;
+                }
 
             }
             _ => ()
@@ -195,18 +224,22 @@ impl <HH: trace::Hook> Rewind <HH> {
 
         let start = Instant::now();
 
+        let mut hook = H::default();
+
         hook.setup(&mut tracer);
 
+        // FIXME: should be in tracer.run
+        // singlestep doesn't need hook and params
         loop {
 
-            let mut bp_trace = tracer.run(&params, hook)?;
+            let mut bp_trace = tracer.run(&params, &mut hook)?;
             trace.seen.append(&mut bp_trace.seen);
             trace.coverage.append(&mut bp_trace.coverage);
             trace.status = bp_trace.status;
             match trace.status {
                 trace::EmulationStatus::Breakpoint => {
                     if hook.handle_breakpoint(&mut tracer)? {
-                        tracer.singlestep(&params, hook)?;
+                        tracer.singlestep(&params, &mut hook)?;
                     }
                 },
                 trace::EmulationStatus::SingleStep => {
@@ -226,53 +259,159 @@ impl <HH: trace::Hook> Rewind <HH> {
 
         hook.handle_trace(&mut trace)?;
 
-        // FIXME: what to do if trace is incomplete
-        // FIXME: will be false if bp are used
         let t = end - start;
 
-        // FIXME: don't store that in trace, use tracer instead
-        let pages = trace.code + trace.data;
+        let pages = tracer.get_mapped_pages()?;
         let mem = rewind_core::helpers::convert((pages * 0x1000) as f64);
-        progress.single(format!("executed {} instructions in {:?} ({:?})", trace.coverage.len(), t, trace.status));
-        progress.single(format!("seen {} unique addresses", trace.seen.len()));
-        progress.single(format!("mapped {} pages ({})", pages, mem));
+        progress.single(format!("executed {} instruction(s) in {:?} ({:?})", trace.coverage.len(), t, trace.status));
+        progress.single(format!("seen {} unique address(es)", trace.seen.len()));
+        progress.single(format!("mapped {} page(s) ({})", pages, mem));
 
         let pages = tracer.restore_snapshot();
         progress.single(format!("{:?} page(s) were modified", pages.unwrap()));
 
-        match &args.trace {
-            Some(path) => {
-                trace.save(&path)?;
+        if let Some(path) = &args.trace {
+            trace.save(&path)?;
+        }
+
+        if args.show_coverage {
+            if let Some(path) = &args.store {
+                if !path.exists() {
+                    progress.warn("symbol store doesn't exist");
+
+                    progress.single("creating symbol store directories");
+                    std::fs::create_dir(&path)?;
+                    std::fs::create_dir(path.join("binaries"))?;
+                    std::fs::create_dir(path.join("symbols"))?;
+                }
+
+                // FIXME: need to resolve lifetime issues in bochs
+                // let snapshot = DumpSnapshot::new(static_ref)?;
+                let mut system = system::System::new(&snapshot)?;
+
+                let progress = progress.leave();
+                let progress = progress.enter("Analysing trace");
+
+                progress.single("loading modules");
+                system.load_modules()?;
+
+                let mut store = pdbstore::PdbStore::new(path)?;
+                // FIXME: rename collection and move definition
+                let mut collection = ui::Collection::new();
+
+                progress.single("parsing trace");
+                parse_trace(&mut collection, &mut trace, &system, &mut store)?;
+
+                progress.single("displaying coverage");
+
+                let mut functions: Vec<_> = collection.functions.iter().collect();
+                functions.sort();
+
+                for (name, instructions) in functions.iter() {
+                    // FIXME: compute percentage
+                    println!("{}: {} instructions", &name, instructions.coverage);
+
+                }
+
+                if args.show_instructions {
+                    let skip = args.skip_instructions.unwrap_or(0);
+
+                    progress.single("displaying instructions");
+                    let instructions = trace.coverage.iter()
+                        .map(|(addr, _context)| {
+                        addr
+                    }).enumerate();
+
+                    let instructions: Box<dyn Iterator<Item = (usize, &u64)>> = if args.last {
+                        if let Some(count) = args.instructions_count {
+                            Box::new(instructions.rev().skip(skip).take(count).rev())
+                        } else {
+                            Box::new(instructions.rev().skip(skip).rev())
+                        }
+                    } else if let Some(count) = args.instructions_count {
+                        Box::new(instructions.skip(skip).take(count))
+                    } else {
+                        Box::new(instructions.skip(skip))
+                    };
+
+                    for (index, addr) in instructions {
+                        let mut bytes = vec![0u8; 16];
+                        system.snapshot.read_gva(context.cr3, *addr, &mut bytes)?;
+                        let instruction = decode_instruction(&bytes)?;
+                        let n = instruction.length as usize;
+                        let formatted_instruction = format_instruction(*addr, instruction)?;
+
+                        let mut formatted_bytes = String::with_capacity(2 * n);
+                        for byte in &bytes[..n] {
+                            write!(formatted_bytes, "{:02x}", byte)?;
+                        }
+                        
+                        let text = match store.resolve_address(*addr) {
+                            Some(symbol) => {
+                                format!("instruction #{}\n{}\n{:016x} {:<32}{:<20}", index, symbol, *addr, formatted_bytes, formatted_instruction)
+                            }
+                            None => {
+                                format!("instruction #{}\n{:016x} {:<32}{:<20}", index, *addr, formatted_bytes, formatted_instruction)
+                            }
+                        };
+
+                        if let Some(filter) = &args.filter {
+                            let pattern = filter.to_lowercase();
+                            if text.to_lowercase().matches(&pattern).count() > 0 {
+                                println!("{}", text);
+                            }
+                        } else {
+                            println!("{}", text);
+                        }
+
+                    }
+
+                }
+
+            } else {
+                progress.warn("need a symbol store to show coverage (--store is missing)")
             }
-            None => {}
+
         }
 
         Ok(())
     }
 
-    pub fn handle_fuzzer_init(&self, args: &FuzzerInit) -> anyhow::Result<()> {
+    pub fn handle_fuzzer_init(&self, args: &FuzzerInit) -> Result<()> {
         let progress = self.progress.enter("Init fuzzer");
+
+        progress.single("checking parameters");
 
         let path = &args.workdir;
         if path.exists() {
-            return Err(anyhow!("fuzzer working directory already exists"))
+            bail!("can't init fuzzer, working directory exists");
         }
 
         let mut fuzz_params = fuzz::Params::default();
 
-        fuzz_params.snapshot_path = std::fs::canonicalize(&args.snapshot)?;
+        let mut input = trace::Input::default();
 
-        let input_str = std::fs::read_to_string(&args.input)?;
-        let input = trace::Input::from_str(&input_str)?;
+        let input_address = u64::from_str_radix(&args.input_address.trim_start_matches("0x"), 16)
+            .wrap_err_with(|| "can't parse input address")?;
 
-        fuzz_params.input = input.address.into();
-        fuzz_params.input_size = input.size.into();
+        input.address = input_address;
+        fuzz_params.input = input_address;
+
+        let input_size = u64::from_str_radix(&args.input_size.trim_start_matches("0x"), 16)
+            .wrap_err_with(|| "can't parse input size")?;
+
+        input.size = input_size;
+        fuzz_params.input_size = input_size;
 
         let snapshot_path = &fuzz_params.snapshot_path;
 
         progress.single("checking snapshot");
         let dump_path = snapshot_path.join("mem.dmp");
-        let _snapshot = DumpSnapshot::new(&dump_path)?;
+
+        let fp = std::fs::File::open(&dump_path).wrap_err_with(|| "can't open snapshot")?;
+        let buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+        let _snapshot = DumpSnapshot::new(&buffer)?;
 
         let context_path = snapshot_path.join("context.json");
         let _context = trace::ProcessorState::load(&context_path)?;
@@ -288,29 +427,37 @@ impl <HH: trace::Hook> Rewind <HH> {
 
         progress.single("writing params");
         fuzz_params.save(path.join("params.json"))?;
+        input.save(path.join("input.json"))?;
+
         Ok(())
     }
 
-    pub fn handle_fuzzer_run<H: trace::Hook>(&self, args: &FuzzerRun, _hook: &mut H) -> anyhow::Result<()> {
-        let progress = self.progress.enter("Running fuzzer");
+    pub fn handle_fuzzer_run(&self, args: &FuzzerRun) -> Result<()> {
+        let progress = self.progress.enter("Launching fuzzer");
 
-        progress.single("loading fuzzer parameters");
+        progress.single("Loading parameters");
         let input_path = args.workdir.join("params.json");
         let mut fuzz_params = fuzz::Params::load(&input_path)?;
  
-        progress.single("will use random strategy");
+        progress.single("Using random strategy");
         // FIXME: strategy should be check from param
-        let mut strategy = mutation::BasicStrategy::new(fuzz_params.input_size as usize);
+        // FIXME: strategy params should be in args too
+        // FIXME: input mutation should be in mutation hints
+        let mut strategy = mutation::BasicStrategy::new();
 
-        // fuzz_params.display_delay = std::time::Duration::from_secs(args.display_delay);
         fuzz_params.max_duration = std::time::Duration::from_secs(args.max_time);
         fuzz_params.max_iterations = args.max_iterations;
+        fuzz_params.stop_on_crash = args.stop_on_crash;
 
         let snapshot_path = &fuzz_params.snapshot_path;
 
-        progress.single("loading snapshot");
+        progress.single("Loading snapshot");
         let dump_path = snapshot_path.join("mem.dmp");
-        let snapshot = DumpSnapshot::new(&dump_path)?;
+
+        let fp = std::fs::File::open(&dump_path)?;
+        let buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+        let snapshot = DumpSnapshot::new(&buffer)?;
 
         let context_path = snapshot_path.join("context.json");
         let context = trace::ProcessorState::load(&context_path)?;
@@ -318,51 +465,78 @@ impl <HH: trace::Hook> Rewind <HH> {
         let params_path = snapshot_path.join("params.json");
         let mut trace_params = trace::Params::load(&params_path)?;
 
-        // params.limit = args.limit;
         trace_params.coverage_mode = args.coverage.clone();
         trace_params.max_duration = std::time::Duration::from_secs(args.max_time);
 
         let mut fuzzer = fuzz::Fuzzer::new(&args.workdir)?;
 
-        eprintln!("Will fuzz function {:x}, input {:x} ({:x})", context.rip, fuzz_params.input, fuzz_params.input_size);
+        progress.single(format!("Fuzzing function {:x} with input {:x} ({:x})", context.rip, fuzz_params.input, fuzz_params.input_size));
 
         let mut tracer = match args.backend {
             crate::BackendType::Bochs => {
-                Backend::Bochs(rewind_bochs::BochsTracer::new(snapshot)?)
+                Backend::Bochs(rewind_bochs::BochsTracer::new(&snapshot))
 
             },
             crate::BackendType::Whvp => {
-                Backend::Whvp(rewind_whvp::WhvpTracer::new(snapshot)?)
+                Backend::Whvp(rewind_whvp::WhvpTracer::new(&snapshot)?)
             }
         };
-            
-        // FIXME: need to send hook
-        let _hook = HH::default();
-        let stats = fuzzer.run(&mut strategy, &fuzz_params, &mut tracer, &context, &trace_params)?;
+        
+        let mut corpus = fuzz::Corpus::new(&args.workdir);
 
-        eprintln!("fuzzing session ended after {:?} and {} iteration(s)", stats.elapsed(), stats.iterations);
+        let mut hook = H::default();
+
+        if args.verbose > 0 {
+            let progress_bar = indicatif::ProgressBar::new_spinner();
+            progress_bar.enable_steady_tick(250);
+            progress_bar.set_style(indicatif::ProgressStyle::default_spinner().template("{spinner} {elapsed} {msg}"));
+
+            let mut last_updated = std::time::Instant::now();
+
+            fuzzer.callback( move |stats| {
+                if last_updated.elapsed() > std::time::Duration::from_millis(1000) {
+                    let elapsed = chrono::Utc::now() - stats.start;
+                    let num_seconds = std::cmp::max(1, elapsed.num_seconds());
+    
+                    let message = format!("{} executions, {} exec/s, coverage {}, mapped pages {} ({}), corpus {}, crashes {}",
+                        stats.iterations,
+                        stats.iterations / num_seconds as u64,
+                        stats.coverage,
+                        stats.mapped_pages,
+                        indicatif::HumanBytes((stats.mapped_pages * 0x1000) as u64),
+                        stats.corpus_size,
+                        stats.crashes);
+
+                    progress_bar.set_message(&message);
+                    last_updated = std::time::Instant::now();
+                }
+                if stats.done {
+                    progress_bar.finish_and_clear();
+                }
+            });
+        }
+
+        let stats = fuzzer.run(&mut corpus, &mut strategy, &fuzz_params, &mut tracer, &context, &trace_params, &mut hook)?;
+
+        progress.single(format!("Session ended after {:?} and {} iteration(s), got {} crash(es)",
+            stats.elapsed(), stats.iterations, stats.crashes));
 
         Ok(())
     }
 
-    pub fn handle_fuzzer_monitor<H: trace::Hook>(&self, args: &FuzzerMonitor, _hook: &mut H) -> anyhow::Result<()> {
-        let progress = self.progress.enter("Running monitor");
-
-        progress.single("loading fuzzer parameters");
-        // start_collector_thread
+    pub fn handle_fuzzer_monitor(&self, args: &FuzzerMonitor) -> Result<()> {
         let (tx, rx) = flume::unbounded();
+        let (control_instance_tx, control_instance_rx) = flume::unbounded();
+        let (control_coverage_tx, control_coverage_rx) = flume::unbounded();
 
-        start_collector_thread(args, tx)?;
+        start_coverage_collector_thread::<H>(control_coverage_rx, tx.clone());
+        start_instances_collector_thread(control_instance_rx, tx);
+
+        control_coverage_tx.send(Control::Start((args.workdir.clone(), args.store.clone())))?;
+        control_instance_tx.send(Control::Start((args.workdir.clone(), args.store.clone())))?;
 
         if args.ui {
             display_tui(rx)?;
-        }
-        else {
-            // FIXME: collect event from rx
-            loop {
-                let collection = rx.recv()?;
-                println!("{:?}", collection.coverage.len());
-            }
         }
 
         Ok(())
@@ -370,19 +544,19 @@ impl <HH: trace::Hook> Rewind <HH> {
 
     // FIXME: insert sanitizer, configure timeout for trace, remove useless corpus entries
 
-    pub fn run<H: trace::Hook>(&self, hook: &mut H) -> anyhow::Result<()>
+    pub fn run(&self) -> Result<()>
     {
         match &self.args.subcmd {
             SubCommand::Trace(t) => {
                 match &t.subcmd {
-                    TraceSubCommand::Run(t) => self.handle_trace_run(t, hook)
+                    TraceSubCommand::Run(t) => self.handle_trace_run(t)
                 }
             }
             SubCommand::Fuzz(t) => {
                 match &t.subcmd {
                     FuzzerSubCommand::Init(t) => self.handle_fuzzer_init(t),
-                    FuzzerSubCommand::Run(t) => self.handle_fuzzer_run(t, hook),
-                    FuzzerSubCommand::Monitor(t) => self.handle_fuzzer_monitor(t, hook)
+                    FuzzerSubCommand::Run(t) => self.handle_fuzzer_run(t),
+                    FuzzerSubCommand::Monitor(t) => self.handle_fuzzer_monitor(t)
                     // FIXME: monitor
                 }
             }
@@ -392,7 +566,7 @@ impl <HH: trace::Hook> Rewind <HH> {
 }
 
 #[derive(Clap, Debug)]
-#[clap(version=crate_version!(), author="Damien Aumaitre")]
+#[clap(name="rewind", version=crate_version!(), author="Damien Aumaitre")]
 struct RewindArgs {
     #[clap(subcommand)]
     pub subcmd: SubCommand,
@@ -439,6 +613,7 @@ pub struct TracerRun {
     #[clap(long, short, parse(from_occurrences))]
     pub verbose: usize,
  
+    /// Snapshot path
     #[clap(long, parse(from_os_str))]
     pub snapshot: std::path::PathBuf,
 
@@ -451,6 +626,7 @@ pub struct TracerRun {
     #[clap(long="max-time", default_value="0")]
     pub max_time: u64,
 
+    /// Save trace to file
     #[clap(long="save-trace", parse(from_os_str))]
     pub trace: Option<std::path::PathBuf>,
 
@@ -460,24 +636,66 @@ pub struct TracerRun {
     #[clap(long="coverage", possible_values(&["no", "instrs", "hit"]), default_value="no")]
     pub coverage: rewind_core::trace::CoverageMode,
 
+    /// JSON file describing input
     #[clap(long="input", parse(from_os_str))]
     pub input: Option<std::path::PathBuf>,
 
+    /// Input data
     #[clap(long="data", parse(from_os_str))]
     pub data: Option<std::path::PathBuf>,
+
+    /// Save input to file
+    #[clap(long="save-input", parse(from_os_str))]
+    pub save_input: Option<std::path::PathBuf>,
+
+    /// Show coverage after execution
+    #[clap(long="show-coverage")]
+    pub show_coverage: bool,
+
+    /// Show executed instructions after execution
+    #[clap(long="show-instructions")]
+    pub show_instructions: bool,
+
+    /// Number of instructions to display
+    #[clap(long="count")]
+    pub instructions_count: Option<usize>,
+
+    /// Number of instructions to skip
+    #[clap(long="skip")]
+    pub skip_instructions: Option<usize>,
+
+    /// Show last executed instructions
+    #[clap(long="last")]
+    pub last: bool,
+
+    /// Show only instructions matching pattern
+    #[clap(long="filter")]
+    pub filter: Option<String>,
+
+    /// Symbol store
+    #[clap(long="store", parse(from_os_str))]
+    pub store: Option<std::path::PathBuf>,
 
 }
 
 #[derive(Clap, Debug)]
 pub struct FuzzerInit {
+    /// Path to snapshot
     #[clap(long="snapshot", parse(from_os_str))]
     pub snapshot: std::path::PathBuf,
 
+    /// Fuzzer work directory
     #[clap(parse(from_os_str))]
     pub workdir: std::path::PathBuf,
 
-    #[clap(long="input", parse(from_os_str))]
-    pub input: std::path::PathBuf,
+    /// Input address
+    #[clap(long="input-address")]
+    pub input_address: String,
+
+    /// Input size
+    #[clap(long="input-size")]
+    pub input_size: String,
+
 }
 
 #[derive(Clap, Debug)]
@@ -531,72 +749,38 @@ pub struct FuzzerMonitor {
 
 }
 
-fn parse_trace(collection: &mut ui::Collection, trace: &mut trace::Trace, system: &system::System, store: &mut pdbstore::PdbStore) -> anyhow::Result<()> {
+fn parse_trace(collection: &mut ui::Collection, trace: &mut trace::Trace, system: &system::System, store: &mut pdbstore::PdbStore) -> Result<()> {
 
-    for &address in trace.seen.difference(&mut collection.coverage) {
-        // if !coverage.insert(address) {
-            // continue
-        // }
-        match system.get_module_by_address(address) {
-            Some(module) => {
-                *collection.modules.entry(module.name.clone()).or_insert_with(|| {
+    for &address in trace.seen.difference(&collection.coverage) {
+        if let Some(module) = system.get_module_by_address(address) {
+            *collection.modules.entry(module.name.clone()).or_insert_with(|| {
 
-                    // FIXME: need a fn in system.rs
-                    match system.get_file_information(module) {
-                        Ok(info) => {
-                            match store.download_pe(&module.name, &info) {
-                                Ok(_) => { }
-                                Err(_error) => {
-                                    // println!("{:?}", error);
-                                }
-                            }
-                        }
-                        Err(_) => { }
-                    }
+                // FIXME: need a fn in system.rs
+                if let Ok(info) = system.get_file_information(module) {
+                    if store.download_pe(&module.name, &info).is_ok() {
 
-                    match system.get_debug_information(module) {
-                        Ok(info) => {
-                            let (name, guid) = info.into();
-                            match store.download_pdb(&name, &guid) {
-                                Ok(_) => {
-                                    match store.load_pdb(module.base, &name, &guid) {
-                                        Ok(_) => (),
-                                        Err(_error) => {
-                                            // println!("{:?}", error);
-                                        }
-                                    }
-                                }
-                                Err(_error) => {
-                                    // println!("{:?}", error);
-                                }
-                            }
-                        }
-                        Err(_) => { }
-
-                    }
-                        
-                    0
-                }) += 1;
-
-                match store.resolve_address(address) {
-                    Some(symbol) => {
-                        // FIXME: get size of symbol and size of func
-                        let name = format!("{}!{}", symbol.module, symbol.name);
-                        collection.functions.entry(name)
-                            .and_modify(|f| f.coverage += 1)
-                            .or_insert_with(|| {
-                                let func = ui::Function::new(symbol.module, symbol.name, 1);
-                                func
-                            });
-                    }
-                    None => {
-                        // FIXME: need to send event
-                        // println!("can't resolve symbol for {:x}", address);
                     }
                 }
-    
+
+                if let Ok(info) = system.get_debug_information(module) {
+                    let (name, guid) = info.into();
+                    if store.download_pdb(&name, &guid).is_ok() && store.load_pdb(module.base, &name, &guid).is_ok() {
+
+                    }
+                }
+
+                0
+            }) += 1;
+
+            if let Some(symbol) = store.resolve_address(address) {
+                // FIXME: get size of symbol and size of func
+                let name = format!("{}!{}", symbol.module, symbol.name);
+                collection.functions.entry(name)
+                    .and_modify(|f| f.coverage += 1)
+                    .or_insert_with(|| {
+                        ui::Function::new(symbol.module, symbol.name, 1)
+                    });
             }
-            None => ()
         }
     }
 
@@ -605,198 +789,260 @@ fn parse_trace(collection: &mut ui::Collection, trace: &mut trace::Trace, system
     Ok(())
 }
 
-// fn display_coverage(modules: &mut HashMap<String, usize>, functions: &mut HashMap<String, usize>) {
-//     let mut modules: Vec<_> = modules.iter().collect();
-//     modules.sort();
+fn replay_file<H: trace::Hook>(_tx: &flume::Sender<Message>,
+        path: &std::path::Path,
+        tracer: &mut rewind_bochs::BochsTracer<DumpSnapshot>,
+        context: &ProcessorState,
+        trace_params: &trace::Params,
+        fuzz_params: &fuzz::Params) -> Result<trace::Trace> {
 
-//     for (name, instructions) in &modules {
-//         // FIXME: compute percentage
-//         println!("{}: {} instructions", &name, instructions);
-//     }
+    // tx.send(Message::Log(format!("replaying {}", path.display())))?;
 
-//     let mut functions: Vec<_> = functions.iter().collect();
-//     functions.sort();
+    let mut file = std::fs::File::open(&path)?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
 
-//     for (name, instructions) in &functions {
-//         // FIXME: compute percentage
-//         println!("{}: {} instructions", &name, instructions);
+    let cr3 = context.cr3;
 
-//     }
-
-// }
-
-fn collector_thread(control_rx: flume::Receiver<Control>, tx: flume::Sender<ui::Collection>) -> anyhow::Result<()> {
-    let control = control_rx.recv()?;
-
-    match control {
-        Control::Args((workdir, store)) => {
-            let input_path = workdir.join("params.json");
-            let fuzz_params = fuzz::Params::load(&input_path)?;
-
-            let snapshot_path = &fuzz_params.snapshot_path;
-
-            let dump_path = snapshot_path.join("mem.dmp");
-            let snapshot = DumpSnapshot::new(&dump_path)?;
-
-            let context_path = snapshot_path.join("context.json");
-            let context = trace::ProcessorState::load(&context_path)?;
-
-            let params_path = snapshot_path.join("params.json");
-            let trace_params = trace::Params::load(&params_path)?;
-
-            // trace_params.max_duration = std::time::Duration::from_secs(args.max_time);
-
-            let mut tracer = rewind_bochs::BochsTracer::new(snapshot)?;
-
-            let mut system = system::System::new(&tracer.snapshot)?;
-            system.load_modules()?;
-
-            let path = &store;
-            if !path.exists() {
-                std::fs::create_dir(&path)?;
-                std::fs::create_dir(path.join("binaries"))?;
-                std::fs::create_dir(path.join("symbols"))?;
-            }
-
-            let mut store = pdbstore::PdbStore::new(path)?;
-
-            let mut hints = fuzz::MutationHint::new();
-
-
-            // FIXME: need to share it
-            let mut hook = fuzz::Hook {};
-
-            // let mut known_files: BTreeSet<std::path::PathBuf> = BTreeSet::new();
-
-            loop {
-                // FIXME: listen to events ?
-                let mut collection = ui::Collection::new();
-
-                let path = workdir.join("instances");
-                let mut entries = std::fs::read_dir(&path)?
-                    .map(|res| res.map(|e| e.path()))
-                    .collect::<Result<Vec<_>, std::io::Error>>()?;
-
-                entries.sort();
-
-                for path in entries {
-                    if path.extension() == Some(std::ffi::OsStr::new("json")) {
-                        let stats = fuzz::Stats::load(&path)?;
-
-                        let filename = path.to_path_buf();
-                        collection.instances.insert(filename, stats);
-                    }
-                }
- 
-                let path = workdir.join("corpus");
-                let mut entries = std::fs::read_dir(&path)?
-                    .map(|res| res.map(|e| e.path()))
-                    .collect::<Result<Vec<_>, std::io::Error>>()?;
-
-                entries.sort();
-
-                for path in entries {
-                    // if known_files.contains(&path) {
-                        // continue
-                    // }
-                    if path.extension() == Some(std::ffi::OsStr::new("bin")) {
-                        let mut file = std::fs::File::open(&path)?;
-                        let mut data = Vec::new();
-                        file.read_to_end(&mut data)?;
-
-                        let cr3 = context.cr3;
-
-                        match tracer.write_gva(cr3, fuzz_params.input, &data) {
-                            Ok(()) => {}
-                            Err(e) => {
-                                return Err(anyhow!("can't write input {}", e));
-                            }
-                        }
-
-                        tracer.set_state(&context)?;
-
-                        let mut trace = tracer.run(&trace_params, &mut hook)?;
-                        tracer.restore_snapshot()?;
-
-                        let corpus_path = path.to_path_buf();
-                        let mut corpus_file = ui::CorpusFile::new(corpus_path);
-                        corpus_file.seen = trace.seen.len() as u64;
-                        corpus_file.count = trace.coverage.len() as u64;
-                        collection.corpus.insert(corpus_file.path.clone(), corpus_file);
-
-                        hints.immediates.append(&mut trace.immediates);
-                        // let address = fuzz_params.input;
-                        // let size = fuzz_params.input_size;
-                        // let filtered = trace.mem_access.iter().filter(|a| {
-                        //     a.1 >= address && a.1 < address + size
-                        // }).map(|a| {
-                        //     a.1 - address
-                        // });
-
-                        // FIXME: need to send this with parameters
-                        let offsets = (8..0x58).chain(0x100..0x108)
-                                                            .chain(0x200..0x208)
-                                                            .chain(0x300..0x308)
-                                                            .chain(0x400..0x408);
-                    
-                        hints.offsets.extend(offsets);
-
-                        // let count = trace.seen.difference(&coverage).count();
-                        if trace.seen.is_subset(&collection.coverage) {
-                            // println!("no new coverage for {:?}, deleting file", path);
-                            std::fs::remove_file(&path)?;
-                        } else {
-                            parse_trace(&mut collection, &mut trace, &system, &mut store)?;
-                            trace.save(workdir.join("traces").join(format!("{}.json", path.file_name().unwrap().to_str().unwrap())))?;
-                        }
-
-                        // known_files.insert(path.to_path_buf());
-
-                        // FIXME: save trace to traces directory
-
-                    }
-                }
-                // println!("immediates {}, offsets {}", hints.immediates.len(), hints.offsets.len());
-                // println!("unique addresses {}, {} modules, {} functions", coverage.len(), modules.len(), functions.len());
-                // display_coverage(&mut modules, &mut functions);
-
-                // FIXME: replay and triage crashes
-
-                let path = workdir.join("hints.json");
-                hints.save(&path)?;
-
-                tx.send(collection)?;
-
-                // FIXME: args
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
+    match Tracer::write_gva(tracer, cr3, fuzz_params.input, &data) {
+        Ok(()) => {}
+        Err(e) => {
+            return Err(Report::msg(format!("can't write input {}", e)));
         }
     }
 
+    tracer.set_state(&context)?;
+
+    let mut hook = H::default();
+    hook.setup(tracer);
+
+    let mut trace = tracer.run(&trace_params, &mut hook)?;
+
+    hook.handle_trace(&mut trace)?;
+    tracer.restore_snapshot()?;
+
+    Ok(trace)
 
 }
 
+fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>, tx: flume::Sender<Message>) -> Result<()> {
+    loop {
+
+        let control = control_rx.recv()?;
+
+        match control {
+            Control::Start((workdir, store)) => {
+                let input_path = workdir.join("params.json");
+                let fuzz_params = fuzz::Params::load(&input_path)?;
+
+                let snapshot_path = &fuzz_params.snapshot_path;
+
+                let dump_path = snapshot_path.join("mem.dmp");
+
+                let fp = std::fs::File::open(&dump_path)?;
+                let buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+                let snapshot = DumpSnapshot::new(&buffer)?;
+
+                let context_path = snapshot_path.join("context.json");
+                let context = trace::ProcessorState::load(&context_path)?;
+
+                let params_path = snapshot_path.join("params.json");
+                let trace_params = trace::Params::load(&params_path)?;
+
+                // trace_params.max_duration = std::time::Duration::from_secs(args.max_time);
+
+                let mut tracer = rewind_bochs::BochsTracer::new(&snapshot);
+
+                let mut system = system::System::new(&snapshot)?;
+                system.load_modules()?;
+
+                let path = &store;
+                if !path.exists() {
+                    std::fs::create_dir(&path)?;
+                    std::fs::create_dir(path.join("binaries"))?;
+                    std::fs::create_dir(path.join("symbols"))?;
+                }
+
+                let mut store = pdbstore::PdbStore::new(path)?;
+
+                let mut hints = mutation::MutationHint::new();
+
+                let mut known_files: BTreeSet<String> = std::collections::BTreeSet::new();
+                    
+                let mut collection = ui::Collection::new();
+
+                let mut need_update = false;
+
+                loop {
+                    let path = workdir.join("corpus");
+                    let mut entries = std::fs::read_dir(&path)?
+                        .map(|res| res.map(|e| e.path()))
+                        .collect::<Result<Vec<_>, std::io::Error>>()?;
+
+                    let path = workdir.join("crashes");
+                    let crash_entries = std::fs::read_dir(&path)?
+                        .map(|res| res.map(|e| e.path()))
+                        .collect::<Result<Vec<_>, std::io::Error>>()?;
+
+                    entries.extend(crash_entries);
+                    entries.sort();
+
+                    for path in entries {
+                        let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+                        if known_files.get(&filename).is_some() {
+                            continue
+                        }
+
+                        if path.extension() == Some(std::ffi::OsStr::new("bin")) {
+                            need_update = true;
+                            let mut trace = replay_file::<H>(&tx, &path, &mut tracer, &context, &trace_params, &fuzz_params)?;
+
+                            let corpus_path = path.to_path_buf();
+
+                            let mut corpus_file = ui::CorpusFile::new(corpus_path.file_name().unwrap());
+                            corpus_file.seen = trace.seen.len() as u64;
+                            corpus_file.count = trace.coverage.len() as u64;
+
+                            match trace.status {
+                                trace::EmulationStatus::Success => {
+                                    tx.send(Message::Corpus(corpus_file))?;
+                                },
+                                _ => {
+                                    tx.send(Message::Crash(corpus_file))?;
+                                }
+                            }
+
+                            known_files.insert(filename);
+
+                            let functions = collection.functions.clone();
+                            tx.send(Message::Coverage(functions))?;
+
+                            hints.immediates.append(&mut trace.immediates);
+                            let address = fuzz_params.input;
+                            let size = fuzz_params.input_size;
+                            let filtered = trace.mem_access.iter()
+                                .filter(|a| {
+                                    a.1 >= address && a.1 < address + size
+                                })
+                                .map(|a| {
+                                    a.1 - address
+                                });
+
+                            hints.offsets.extend(filtered);
+
+                            if trace.seen.is_subset(&collection.coverage) {
+                                std::fs::remove_file(&path)?;
+                            } else {
+                                parse_trace(&mut collection, &mut trace, &system, &mut store)?;
+                                trace.save(workdir.join("traces").join(format!("{}.json", path.file_name().unwrap().to_str().unwrap())))?;
+                            }
+                        }
+                    }
+
+                    if need_update {
+                        tx.send(Message::Log(format!("immediates {}, offsets {}", hints.immediates.len(), hints.offsets.len())))?;
+                        tx.send(Message::Log(format!("unique addresses {}, {} modules, {} functions", collection.coverage.len(), collection.modules.len(), collection.functions.len())))?;
+                        let path = workdir.join("hints.json");
+                        hints.save(&path)?;
+                        need_update = false;
+                        
+                    }
+
+                    // if !control_rx.is_empty() {
+                    //     tx.send(Message::Log("someone talked to me".to_string()))?;
+                    //     break
+                    // }
+
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            },
+            _ => {
+                tx.send(Message::Log("stopping coverage thread".to_string()))?;
+                return Ok(())
+            }
+        }
+
+    }
+
+}
+
+#[derive(Debug)]
 enum Control {
-    Args((std::path::PathBuf, std::path::PathBuf))
+    Start((std::path::PathBuf, std::path::PathBuf)),
+    Stop,
 }
 
-fn start_collector_thread(args: &FuzzerMonitor, tx: flume::Sender<ui::Collection>) -> anyhow::Result<()> {
-    let (control_tx, control_rx) = flume::unbounded();
-    thread::spawn(move || {
-        let result = collector_thread(control_rx, tx);
+#[derive(Debug)]
+enum Message {
+    Instances(HashMap<std::path::PathBuf, fuzz::Stats>),
+    Log(String),
+    Coverage(HashMap<String, ui::Function>),
+    Corpus(ui::CorpusFile),
+    Crash(ui::CorpusFile),
+}
+
+fn start_coverage_collector_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>, tx: flume::Sender<Message>) {
+    thread::spawn( move || {
+        let result = collect_coverage_thread::<H>(control_rx, tx);
         println!("thread returned {:?}", result);
     });
-    control_tx.send(Control::Args((args.workdir.clone(), args.store.clone())))?;
-    Ok(())
 }
 
-fn display_tui(data_rx: flume::Receiver<ui::Collection>) -> anyhow::Result<()> {
-    // let is_debug = false;
+fn start_instances_collector_thread(control_rx: flume::Receiver<Control>, tx: flume::Sender<Message>) {
+    thread::spawn( move || {
+        let result = collect_instances_thread(control_rx, tx);
+        println!("thread returned {:?}", result);
+    });
+ 
+}
 
-    // FIXME: use a func similar to cleanup_terminal => setup_terminal ?
-    let mut stdout_val = stdout();
-    ui::execute!(stdout_val, ui::EnterAlternateScreen, ui::EnableMouseCapture)?;
-    ui::enable_raw_mode()?;
+fn collect_instances_thread(control_rx: flume::Receiver<Control>, tx: flume::Sender<Message>) -> Result<()> {
+    loop {
+        let control = control_rx.recv()?;
+        match control {
+            Control::Start((workdir, _store)) => {
+                loop {
+                    let path = workdir.join("instances");
+                    let mut entries = std::fs::read_dir(&path)?
+                        .map(|res| res.map(|e| e.path()))
+                        .collect::<Result<Vec<_>, std::io::Error>>()?;
+
+                    entries.sort();
+
+                    let mut instances = HashMap::new();
+                    for path in entries {
+                        if path.extension() == Some(std::ffi::OsStr::new("json")) {
+                            let stats = fuzz::Stats::load(&path)?;
+
+                            let filename = path.to_path_buf();
+                            instances.insert(filename, stats);
+                        }
+                    }
+                        
+                    tx.send(Message::Instances(instances))?;
+
+                    if !control_rx.is_empty() {
+                        break
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+
+            },
+            _ => {
+                tx.send(Message::Log("stopping thread".to_string()))?;
+                return Ok(())
+            }
+        }
+ 
+    }
+}
+
+
+
+fn display_tui(data_rx: flume::Receiver<Message>) -> Result<()> {
+    let stdout_val = ui::setup_terminal()?;
 
     let backend = ui::CrosstermBackend::new(stdout_val);
 
@@ -804,6 +1050,7 @@ fn display_tui(data_rx: flume::Receiver<ui::Collection>) -> anyhow::Result<()> {
 
     // Setup input handling
     let (tx, rx) = mpsc::channel();
+    let collector_tx = tx.clone();
 
     let tick_rate = Duration::from_millis(250);
     // polling thread
@@ -814,6 +1061,7 @@ fn display_tui(data_rx: flume::Receiver<ui::Collection>) -> anyhow::Result<()> {
             let timeout = tick_rate
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or_else(|| Duration::from_secs(0));
+
             if ui::event::poll(timeout).unwrap() {
                 if let ui::Event::Key(key) = ui::event::read().unwrap() {
                     tx.send(ui::TuiEvent::Input(key)).unwrap();
@@ -826,7 +1074,32 @@ fn display_tui(data_rx: flume::Receiver<ui::Collection>) -> anyhow::Result<()> {
         }
     });
 
-    let mut app = ui::App::new("Rewind monitor");
+    // collector thread
+    thread::spawn(move || {
+        while let Ok(message) = data_rx.recv() {
+            match message {
+                Message::Log(m) => {
+                    let now: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
+                    let m = format!("{} {}", now.to_rfc2822(), m);
+                    collector_tx.send(ui::TuiEvent::Log(m)).unwrap()
+                },
+                Message::Instances(i) => {
+                    collector_tx.send(ui::TuiEvent::Instances(i)).unwrap()
+                },
+                Message::Coverage(c) => {
+                    collector_tx.send(ui::TuiEvent::Coverage(c)).unwrap();
+                },
+                Message::Corpus(i) => {
+                    collector_tx.send(ui::TuiEvent::Corpus(i)).unwrap();
+                }
+                Message::Crash(i) => {
+                    collector_tx.send(ui::TuiEvent::Crash(i)).unwrap();
+                }
+            }
+        }
+    });
+
+    let mut app = ui::App::new();
 
     terminal.clear()?;
     terminal.hide_cursor()?;
@@ -840,32 +1113,57 @@ fn display_tui(data_rx: flume::Receiver<ui::Collection>) -> anyhow::Result<()> {
                     break;
                 }
                 ui::KeyCode::Char(c) => app.on_key(c),
-                // KeyCode::Left => app.on_left(),
-                // KeyCode::Right => app.on_right(),
+                ui::KeyCode::Left => app.on_left(),
+                ui::KeyCode::Right => app.on_right(),
                 ui::KeyCode::Tab => app.on_tab(),
                 ui::KeyCode::Up => app.on_up(),
                 ui::KeyCode::Down => app.on_down(),
+                ui::KeyCode::PageUp => app.on_page_up(),
+                ui::KeyCode::PageDown => app.on_page_down(),
                 _ => {}
             },
             ui::TuiEvent::Tick => {
                 app.on_tick();
+            },
+            ui::TuiEvent::Coverage(c) => {
+                app.on_collect(c);
+            },
+            ui::TuiEvent::Log(l) => {
+                app.on_log(l)
+            },
+            ui::TuiEvent::Instances(i) => {
+                app.on_instance(i)
+            },
+            ui::TuiEvent::Corpus(i) => {
+                app.on_corpus(i)
+            },
+            ui::TuiEvent::Crash(i) => {
+                app.on_crash(i)
             }
         }
 
-        // FIXME: move this in thread and with proper event
-        match data_rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(collection) => {
-                app.on_collect(collection);
-            }
-            Err(_) => {
-
-            }
-        }
-
-        if app.should_quit {
-            break;
-        }
     }
 
     Ok(())
 }
+
+fn decode_instruction(buffer: &[u8]) -> Result<zydis::DecodedInstruction> {
+    let decoder = zydis::Decoder::new(zydis::MachineMode::LONG_64, zydis::AddressWidth::_64)?;
+    let result = decoder.decode(&buffer)?;
+    if let Some(instruction) = result {
+        Ok(instruction)
+    } else {
+        Err(Report::msg("can't decode instruction".to_string()))
+    }
+}
+
+fn format_instruction(rip: u64, instruction: zydis::DecodedInstruction) -> Result<String> {
+    let mut formatter = zydis::Formatter::new(zydis::FormatterStyle::INTEL)?;
+    formatter.set_property(zydis::FormatterProperty::HexUppercase(false))?;
+    let mut buffer = [0u8; 200];
+    let mut buffer = zydis::OutputBuffer::new(&mut buffer[..]);
+    formatter.format_instruction(&instruction, &mut buffer, Some(rip as u64), None)?;
+    let output = format!("{}", buffer);
+    Ok(output)
+}
+

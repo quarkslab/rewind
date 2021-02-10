@@ -1,5 +1,8 @@
-use std::io::Write;
+use std::{io::Write, path::PathBuf};
 use std::collections::{HashMap, BTreeSet};
+
+use fuzz::Stats;
+use thiserror::Error;
 
 use rewind_core::fuzz;
 
@@ -16,7 +19,7 @@ pub use tui::{
     symbols,
     widgets::canvas::{Canvas, Line, Map, MapResolution, Rectangle},
     widgets::{
-        Axis, BarChart, Block, Borders, Chart, Dataset, Gauge, LineGauge, List, ListItem,
+        Axis, BarChart, Block, Borders, Chart, Dataset, Gauge, LineGauge, List, ListItem, ListState,
         Paragraph, Row, Cell, Sparkline, Table, Tabs, Wrap, TableState, BorderType,
     },
     style::{Color, Modifier, Style},
@@ -24,9 +27,25 @@ pub use tui::{
     Terminal
 };
 
+#[derive(Error, Debug)]
+pub enum TuiError {
+    #[error("io error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("terminal error: {0}")]
+    TermError(#[from] crossterm::ErrorKind),
+
+
+}
+
 pub enum TuiEvent<I> {
     Input(I),
     Tick,
+    Instances(HashMap<std::path::PathBuf, fuzz::Stats>),
+    Log(String),
+    Coverage(HashMap<String, Function>),
+    Corpus(CorpusFile),
+    Crash(CorpusFile),
 }
 
 
@@ -171,6 +190,12 @@ impl Function {
     }
 }
 
+impl std::fmt::Display for Function {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}!{}", self.module, self.name)
+    }
+}
+
 struct CoverageWidget {
     state: TableState,
     functions: Vec<Function>,
@@ -218,11 +243,54 @@ impl CoverageWidget {
         self.state.select(Some(i));
     }
 }
+struct CrashesWidget {
+    state: TableState,
+    files: Vec<CorpusFile>,
+}
+
+impl CrashesWidget {
+    fn new() -> Self {
+        Self {
+            state: TableState::default(),
+            files: Vec::new(),
+        }
+    }
+
+    pub fn next(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                if i >= self.files.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+
+    pub fn previous(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.files.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+}
+
 
 enum Widget {
     Instances,
     Corpus,
-    Coverage
+    Coverage,
+    Crash,
 }
 
 impl Widget {
@@ -231,7 +299,8 @@ impl Widget {
         match self {
             Self::Instances => Self::Corpus,
             Self::Corpus => Self::Coverage,
-            Self::Coverage => Self::Instances,
+            Self::Coverage => Self::Crash,
+            Self::Crash => Self::Instances,
         }
     }
 }
@@ -240,7 +309,6 @@ impl Widget {
 pub struct Collection {
     pub coverage: BTreeSet<u64>,
     pub corpus: HashMap<std::path::PathBuf, CorpusFile>,
-    pub instances: HashMap<std::path::PathBuf, fuzz::Stats>,
     pub modules: HashMap<String, usize>,
     pub functions: HashMap<String, Function>,
 }
@@ -253,34 +321,81 @@ impl Collection {
             modules: HashMap::new(),
             functions: HashMap::new(),
             corpus: HashMap::new(),
-            instances: HashMap::new(),
         }
     }
 
 }
 
-pub struct App<'a> {
-    pub title: &'a str,
-    pub should_quit: bool,
+impl Default for Collection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct LogsWidget {
+    state: ListState,
+    items: Vec<String>,
+}
+
+impl LogsWidget {
+    fn new() -> Self {
+        Self {
+            state: ListState::default(),
+            items: Vec::new(),
+        }
+    }
+
+    pub fn next(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                if i >= self.items.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+
+    pub fn _previous(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.items.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+}
+
+pub struct App {
     stats_widget: StatsWidget,
     instances_widget: InstanceWidget,
     corpus_widget: CorpusWidget,
     coverage_widget: CoverageWidget,
+    crashes_widget: CrashesWidget,
+    logs_widget: LogsWidget,
     active_widget: Widget,
     // points: Vec<(f64, f64)>,
     // ticks: usize,
 }
 
-impl<'a> App<'a> {
+impl App {
 
-    pub fn new(title: &'a str) -> Self {
+    pub fn new() -> Self {
         Self {
-            title,
-            should_quit: false,
             stats_widget: StatsWidget::new(),
             instances_widget: InstanceWidget::new(),
             corpus_widget: CorpusWidget::new(),
             coverage_widget: CoverageWidget::new(),
+            crashes_widget: CrashesWidget::new(),
+            logs_widget: LogsWidget::new(),
             active_widget: Widget::Instances,
             // points: Vec::new(),
             // ticks: 0,
@@ -288,34 +403,41 @@ impl<'a> App<'a> {
 
     }
 
-    pub fn on_key(&mut self, c: char) {
-        match c {
-            'q' => {
-                self.should_quit = true;
-            }
-            _ => {}
-        }
+    pub fn on_key(&mut self, _c: char) {
     }
 
-    pub fn on_collect(&mut self, collection: Collection) {
-        self.stats_widget.coverage = collection.coverage.len() as u64;
+    pub fn on_collect(&mut self, functions: HashMap<String, Function>) {
+        // self.stats_widget.coverage = collection.coverage.len() as u64;
 
         self.coverage_widget.functions.clear();
-        self.coverage_widget.functions.extend(collection.functions.values().cloned());
+        self.coverage_widget.functions.extend(functions.values().cloned());
         self.coverage_widget.functions.sort();
 
-        self.corpus_widget.files.clear();
-        self.corpus_widget.files.extend(collection.corpus.values().cloned());
-        // self.corpus_widget.files.sort();
-        self.corpus_widget.files.sort_by(|a, b| { b.count.cmp(&a.count) });
+    }
 
+    pub fn on_corpus(&mut self, file: CorpusFile) {
+        self.corpus_widget.files.push(file);
+        self.corpus_widget.files.sort_by(|a, b| { b.count.cmp(&a.count) });
+    }
+
+    pub fn on_crash(&mut self, file: CorpusFile) {
+        self.crashes_widget.files.push(file);
+        self.crashes_widget.files.sort_by(|a, b| { b.count.cmp(&a.count) });
+    }
+
+    pub fn on_instance(&mut self, instances: HashMap<PathBuf, Stats>) {
         self.instances_widget.instances.clear();
-        self.instances_widget.instances.extend(collection.instances.values().cloned());
-        // self.instances_widget.instances.sort();
+        self.instances_widget.instances.extend(instances.values().cloned());
         // FIXME: short by time, remove old instances ?
         self.instances_widget.instances.sort_by(|a, b| { a.uuid.cmp(&b.uuid) });
+    }
 
-
+    pub fn on_log(&mut self, log: String) {
+        self.logs_widget.items.push(log);
+        if self.logs_widget.items.len() > 50 {
+            self.logs_widget.items.remove(0);
+        }
+        self.logs_widget.next();
     }
 
     pub fn on_tick(&mut self) {
@@ -338,6 +460,27 @@ impl<'a> App<'a> {
             },
             Widget::Coverage => {
                 self.coverage_widget.previous()
+            },
+            Widget::Crash => {
+                self.crashes_widget.previous()
+            }
+        }
+
+    }
+
+    pub fn on_page_up(&mut self) {
+        match self.active_widget {
+            Widget::Instances => {
+                self.instances_widget.previous()
+            },
+            Widget::Corpus => {
+                self.corpus_widget.previous()
+            },
+            Widget::Coverage => {
+                self.coverage_widget.previous()
+            },
+            Widget::Crash => {
+                self.crashes_widget.previous()
             }
         }
 
@@ -353,6 +496,26 @@ impl<'a> App<'a> {
             },
             Widget::Coverage => {
                 self.coverage_widget.next()
+            },
+            Widget::Crash => {
+                self.crashes_widget.next()
+            }
+        }
+    }
+
+    pub fn on_page_down(&mut self) {
+        match self.active_widget {
+            Widget::Instances => {
+                self.instances_widget.next()
+            },
+            Widget::Corpus => {
+                self.corpus_widget.next()
+            },
+            Widget::Coverage => {
+                self.coverage_widget.next()
+            },
+            Widget::Crash => {
+                self.crashes_widget.next()
             }
         }
     }
@@ -367,9 +530,24 @@ impl<'a> App<'a> {
 
 }
 
+impl Default for App {
+
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn setup_terminal() -> Result<std::io::Stdout, TuiError> {
+    let mut stdout_val = std::io::stdout();
+    execute!(stdout_val, EnterAlternateScreen, EnableMouseCapture)?;
+    enable_raw_mode()?;
+
+    Ok(stdout_val)
+}
+
 pub fn cleanup_terminal(
     terminal: &mut tui::terminal::Terminal<tui::backend::CrosstermBackend<std::io::Stdout>>,
-) -> anyhow::Result<()> {
+) -> Result<(), TuiError> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -388,7 +566,9 @@ pub fn draw(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, app: &mut App) {
                 Constraint::Percentage(5),
                 Constraint::Percentage(20),
                 Constraint::Percentage(20),
-                Constraint::Percentage(55),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+                Constraint::Percentage(15),
             ]
             .as_ref(),
         )
@@ -398,6 +578,8 @@ pub fn draw(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, app: &mut App) {
     draw_instances(f, chunks[1], app);
     draw_corpus(f, chunks[2], app);
     draw_coverage(f, chunks[3], app);
+    draw_crashes(f, chunks[4], app);
+    draw_logs(f, chunks[5], app);
 
 }
 
@@ -421,12 +603,17 @@ fn draw_statistics(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect,
         Spans::from(format!("{} iterations, {} exec/s, coverage {}", iterations, execs, coverage)),
     ];
 
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+    let title_style = Style::default()
+            .add_modifier(Modifier::BOLD);
+    
+    // FIXME: rajouter le repertoire de fuzzing
+    // afficher le snapshot (fuzz_params)
+    let title = Span::styled(
         "Statistics",
-        Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::BOLD),
-    ));
+        title_style
+    );
+
+    let block = Block::default().borders(Borders::ALL).title(title);
 
     let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
     f.render_widget(paragraph, area);
@@ -450,7 +637,8 @@ fn draw_instances(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
         };
 
         let elapsed = (s.updated - s.start).to_std().unwrap();
-        let execs = s.iterations / (s.updated - s.start).num_seconds() as u64;
+        let num_seconds = std::cmp::max(1, (s.updated - s.start).num_seconds());
+        let execs = s.iterations / num_seconds as u64;
         Row::new(vec![format!("{}", s.uuid),
                       format!("{:?}", elapsed),
                       format!("{}", s.iterations),
@@ -464,12 +652,26 @@ fn draw_instances(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
         _ => BorderType::Plain
     };
  
+    let title_style = match app.active_widget {
+        Widget::Instances => Style::default().add_modifier(Modifier::BOLD),
+        _ => Style::default()
+    };
+
     let title = format!("Instances ({} fuzzer(s))", app.instances_widget.instances.len());
+    let title = Span::styled(
+        title,
+        title_style
+    );
+
+    let header_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+
 
     let table = Table::new(rows)
         .header(
             Row::new(vec!["Instance", "Time", "Iterations", "Exec/s", "Coverage"])
-                .style(Style::default().fg(Color::Yellow))
+                .style(header_style)
                 .bottom_margin(1),
         )
         .block(Block::default().title(title).borders(Borders::ALL).border_type(border_type))
@@ -481,6 +683,7 @@ fn draw_instances(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
             Constraint::Percentage(15),
             Constraint::Percentage(15),
         ]);
+
     f.render_stateful_widget(table, area, &mut app.instances_widget.state);
 }
 
@@ -499,7 +702,16 @@ fn draw_corpus(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app
         _ => BorderType::Plain
     };
 
+    let title_style = match app.active_widget {
+        Widget::Corpus => Style::default().add_modifier(Modifier::BOLD),
+        _ => Style::default()
+    };
+
     let title = format!("Corpus ({} file(s))", app.corpus_widget.files.len());
+    let title = Span::styled(
+        title,
+        title_style
+    );
 
     let table = Table::new(rows)
         .header(
@@ -583,8 +795,8 @@ fn draw_functions(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
     let selected_style = Style::default().add_modifier(Modifier::REVERSED);
 
     let rows = app.coverage_widget.functions.iter().map(|item| {
-        Row::new(vec![format!("{}", item.module),
-                      format!("{}", item.name),
+        Row::new(vec![item.module.to_string(),
+                      item.name.to_string(),
                       format!("{}", item.coverage)])
     });
 
@@ -593,7 +805,18 @@ fn draw_functions(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
         _ => BorderType::Plain
     };
 
+    let title_style = match app.active_widget {
+        Widget::Coverage => Style::default().add_modifier(Modifier::BOLD),
+        _ => Style::default()
+    };
+
     let title = format!("Coverage ({} function(s))", app.coverage_widget.functions.len());
+
+    let title = Span::styled(
+        title,
+        title_style
+    );
+
     let table = Table::new(rows)
         .header(
             Row::new(vec!["Module", "Function", "Coverage"])
@@ -609,4 +832,74 @@ fn draw_functions(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
         ]);
 
     f.render_stateful_widget(table, area, &mut app.coverage_widget.state);
+}
+
+fn draw_crashes(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app: &mut App) {
+    let selected_style = Style::default().add_modifier(Modifier::REVERSED);
+
+    let rows = app.crashes_widget.files.iter().map(|item| {
+        Row::new(vec![format!("{}", item.path.display()),
+                      format!("{}", item.count),
+                      format!("{}", item.seen),
+                      ])
+    });
+
+    let border_type = match app.active_widget {
+        Widget::Crash => BorderType::Thick,
+        _ => BorderType::Plain
+    };
+
+    let title_style = match app.active_widget {
+        Widget::Crash => Style::default().add_modifier(Modifier::BOLD),
+        _ => Style::default()
+    };
+
+    let title = format!("Crashes ({} file(s))", app.crashes_widget.files.len());
+
+    let title = Span::styled(
+        title,
+        title_style
+    );
+
+    let table = Table::new(rows)
+        .header(
+            Row::new(vec!["File", "Instructions", "Unique"])
+                .style(Style::default().fg(Color::Yellow))
+                .bottom_margin(1),
+        )
+        .block(Block::default().title(title).borders(Borders::ALL).border_type(border_type))
+        .highlight_style(selected_style)
+        .widths(&[
+            Constraint::Percentage(40),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+        ]);
+
+    f.render_stateful_widget(table, area, &mut app.crashes_widget.state);
+}
+
+fn draw_logs(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app: &mut App) {
+    let title_style = Style::default();
+
+    let title = Span::styled(
+        "Logs",
+        title_style
+    );
+
+    let block = Block::default().borders(Borders::ALL).title(title);
+
+    let logs: Vec<ListItem> = app
+        .logs_widget
+        .items
+        .iter()
+        .map(|s| {
+            let content = vec![Spans::from(vec![
+                Span::raw(s),
+            ])];
+            ListItem::new(content)
+        })
+        .collect();
+    let logs = List::new(logs).block(block);
+    f.render_stateful_widget(logs, area, &mut app.logs_widget.state);
+
 }

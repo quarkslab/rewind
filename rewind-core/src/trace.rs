@@ -8,11 +8,10 @@ use std::io::{BufWriter, Write};
 use std::time::{Instant, Duration};
 
 use thiserror::Error;
-// use anyhow::Result;
 
-use serde::{Serialize, Deserialize, Deserializer, de::Error};
+use serde::{Serialize, Deserialize};
 
-use crate::error;
+use crate::{error, mem};
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Segment {
@@ -195,7 +194,7 @@ impl FromStr for Params {
     }
 }
 
-#[derive(Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, PartialOrd, Serialize, Deserialize, Clone)]
 pub enum EmulationStatus {
     Success,
     Error(String),
@@ -222,7 +221,7 @@ impl std::fmt::Display for EmulationStatus {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct Context {
     pub rax: u64,
     pub rbx: u64,
@@ -244,7 +243,7 @@ pub struct Context {
     pub rip: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Trace {
     #[serde(skip)]
     pub start: Option<Instant>,
@@ -310,41 +309,10 @@ impl FromStr for Trace {
     }
 }
 
-#[derive(Debug, Serialize, PartialEq, Default)]
-pub struct HexNumber(u64);
-
-impl<'de> Deserialize<'de> for HexNumber {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s: &str = Deserialize::deserialize(deserializer)?;
-        // do better hex decoding than this
-        u64::from_str_radix(&s[2..], 16)
-            .map(HexNumber)
-            .map_err(D::Error::custom)
-    }
-}
-
-impl From<u64> for HexNumber {
-
-    fn from(n: u64) -> Self {
-        Self(n)
-    }
-}
-
-impl From<HexNumber> for u64 {
-
-    fn from(n: HexNumber) -> Self {
-        n.0
-    }
-}
-
-
 #[derive(Default, Serialize, Deserialize, Debug)]
 pub struct Input {
-    pub address: HexNumber,
-    pub size: HexNumber,
+    pub address: u64,
+    pub size: u64,
 }
 
 impl Input {
@@ -379,19 +347,26 @@ impl FromStr for Input {
 
 #[derive(Debug, Error)]
 pub enum TracerError {
+    #[error(transparent)]
     FileError(#[from]std::io::Error),
+
+    #[error(transparent)]
     SerdeError(#[from]serde_json::Error),
+
+    #[error(transparent)]
     GenericError(#[from]error::GenericError),
+
+    #[error(transparent)]
+    VirtMemError(#[from]crate::mem::VirtMemError),
+
+    #[error("unknown error: {}", .0)]
+    UnknownError(String),
+
+    #[error("first exec failed: {}", .0)]
     FirstExecFailed(String),
+
+    #[error("bad input size: {}", .0)]
     BadInputSize(usize),
-
-}
-
-impl std::fmt::Display for TracerError {
-
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "error: {:?}", self)
-    }
 
 }
 
@@ -402,7 +377,7 @@ pub trait Tracer {
 
     fn set_state(&mut self, state: &ProcessorState) -> Result<(), TracerError>;
 
-    fn run<H: Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace, TracerError>;
+    fn run<'a, H: Hook>(&'a mut self, params: &'a Params, hook: &'a mut H) -> Result<Trace, TracerError>;
 
     fn restore_snapshot(&mut self) -> Result<usize, TracerError>;
 
@@ -422,12 +397,29 @@ pub trait Tracer {
 
 
 pub trait Hook: Default {
-    fn setup<T: Tracer>(&self, tracer: &mut T);
+    fn setup<T: Tracer + mem::X64VirtualAddressSpace>(&self, tracer: &mut T);
 
-    fn handle_breakpoint<T: Tracer>(&mut self, tracer: &mut T) -> Result<bool, TracerError>;
+    fn handle_breakpoint<T: Tracer + mem::X64VirtualAddressSpace>(&mut self, tracer: &mut T) -> Result<bool, TracerError>;
 
     fn handle_trace(&self, trace: &mut Trace) -> Result<bool, TracerError>;
 
 }
 
+#[derive(Default)]
+pub struct NoHook {
 
+}
+
+impl Hook for NoHook {
+    fn setup<T: Tracer + mem::X64VirtualAddressSpace>(&self, _tracer: &mut T) {
+        
+    }
+
+    fn handle_breakpoint<T: Tracer + mem::X64VirtualAddressSpace>(&mut self, _tracer: &mut T) -> Result<bool, TracerError> {
+        Ok(true)
+    }
+
+    fn handle_trace(&self, _trace: &mut Trace) -> Result<bool, TracerError> {
+        Ok(true)
+    }
+}

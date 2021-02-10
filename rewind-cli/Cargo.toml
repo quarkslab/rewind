@@ -8,8 +8,8 @@ edition = "2018"
 
 [dependencies]
 term = "0.6.1"
-anyhow = "1.0.28"
 clap = "3.0.0-beta.2" 
+memmap = "0.7.0"
 
 rewind-core = { path = "../rewind-core" }
 rewind-bochs = { path = "../rewind-bochs" }
@@ -17,4 +17,13 @@ rewind-whvp = { path = "../rewind-whvp" }
 rewind-snapshot = { path = "../rewind-snapshot" }
 rewind-system = { path = "../rewind-system" }
 rewind-tui = { path = "../rewind-tui" }
+
 flume = "0.10.0"
+zydis = "3.1.1"
+color-eyre = "0.5.10"
+indicatif = "0.15.0"
+chrono = "0.4.19"
+
+[[bin]]
+name = "rewind"
+path = "src/main.rs"

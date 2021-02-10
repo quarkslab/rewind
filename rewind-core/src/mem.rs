@@ -1,6 +1,4 @@
 
-use std::error::Error;
-use std::fmt;
 use std::iter;
 use std::mem;
 
@@ -9,7 +7,7 @@ use std::hash::BuildHasherDefault;
 
 use fnv::FnvHasher;
 
-// use anyhow::Result;
+use thiserror::Error;
 
 pub type FastMap64<K, V> = HashMap<K, V, BuildHasherDefault<FnvHasher>>;
 
@@ -404,6 +402,7 @@ impl TranslatedAddress {
 
 }
 
+#[derive(Debug)]
 pub struct Allocator {
     pages: Vec<(usize, usize)>,
 }
@@ -500,30 +499,28 @@ impl X64VirtualAddressSpace for GpaManager {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Error, Debug)]
 pub enum VirtMemError {
+    #[error("pml4e not present")]
     Pml4eNotPresent,
+
+    #[error("pdpte not present")]
     PdpteNotPresent,
+
+    #[error("pde not present")]
     PdeNotPresent,
+
+    #[error("pte not present")]
     PteNotPresent,
+
+    #[error("spanning page")]
     SpanningPage,
+
+    #[error("missing page {:x}", .0)]
     MissingPage(u64),
-}
 
-impl fmt::Display for VirtMemError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl Error for VirtMemError {
-    fn description(&self) -> &str {
-        "virtual to physical translation error"
-    }
-
-    fn cause(&self) -> Option<&dyn Error> {
-        None
-    }
+    #[error("generic error {}", .0)]
+    GenericError(String),
 }
 
 pub fn chunked(start: Gva, sz: usize) -> impl Iterator<Item = (Gva, usize)> {
