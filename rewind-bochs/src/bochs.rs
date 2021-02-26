@@ -668,7 +668,7 @@ mod test {
     }
 
     impl trace::Hook for TestHook {
-        fn setup<T: trace::Tracer>(&self, _tracer: &mut T) {
+        fn setup<T: trace::Tracer>(&mut self, _tracer: &mut T) {
 
         }
 
@@ -678,6 +678,10 @@ mod test {
 
         fn handle_trace(&self, _trace: &mut trace::Trace) -> Result<bool, trace::TracerError> {
             Ok(true)
+        }
+
+        fn patch_page(&self, _: u64) -> bool {
+            todo!()
         }
     }
 

@@ -7,16 +7,6 @@ use std::io::{BufWriter, Write};
 use std::thread;
 use std::sync::mpsc;
 
-use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-
-use std::ffi::OsStr;
-use std::fs;
-use std::fs::File;
-use std::io::prelude::*;
-use std::path::Path;
-
 use serde::{Serialize, Deserialize};
 
 use chrono::{Utc, DateTime};
@@ -26,6 +16,7 @@ use thiserror::Error;
 use crate::{mutation::MutationHint, trace};
 use crate::watch;
 use crate::error;
+use crate::corpus::{calculate_hash, Corpus};
 
 use crate::helpers::convert;
 
@@ -160,54 +151,6 @@ impl FromStr for Params {
     }
 }
 
-#[derive(Debug)]
-pub struct Corpus {
-    pub workdir: std::path::PathBuf,
-    pub members: HashMap<u64, Vec<u8>>,
-}
-
-impl Corpus {
-    pub fn new<S>(workdir: S) -> Self 
-    where S: Into<std::path::PathBuf> {
-        // FIXME: check if corpus and crashes directories are created
-        Corpus {
-            workdir: workdir.into(),
-            members: HashMap::new()
-       }
-    }
-
-    pub fn load(&mut self) -> Result<usize, error::GenericError> {
-        let path = Path::new(&self.workdir).join("corpus");
-        let paths = fs::read_dir(path)?;
-        let mut total = 0;
-        for path in paths {
-            let path = path?.path();
-            if path.extension() == Some(OsStr::new("bin")) {
-                let mut file = File::open(&path)?;
-                let mut data = Vec::new();
-                file.read_to_end(&mut data)?;
-                let hash = calculate_hash(&data);
-                self.members.insert(hash, data);
-                total += 1;
-            }
-        }
-
-        Ok(total)
-    }
-
-    pub fn add(&mut self, input: &[u8]) -> Result<(), error::GenericError> {
-        let hash = calculate_hash(input);
-        self.members.insert(hash, input.to_vec());
-        Ok(())
-    }
-
-}
-
-pub fn calculate_hash<T: Hash + ?Sized>(t: &T) -> u64 {
-    let mut s = DefaultHasher::new();
-    t.hash(&mut s);
-    s.finish()
-}
 
 // FIXME: need a Mutator trait
 // with just mutate input
@@ -219,7 +162,7 @@ pub trait Strategy {
 
     fn generate_new_input(&mut self, data: &mut [u8], corpus: &mut Corpus, hint: &mut MutationHint);
 
-    fn check_new_coverage(&mut self, params: &Params, trace: &mut trace::Trace, corpus: &mut Corpus) -> usize; 
+    fn check_new_coverage(&mut self, params: &Params, trace: &mut trace::Trace) -> usize; 
 
     fn get_coverage(&mut self) -> usize;
 
@@ -247,7 +190,7 @@ impl std::fmt::Display for FuzzerError {
 
 pub struct Fuzzer<'a> {
     path: std::path::PathBuf,
-    channel: mpsc::Receiver<Vec<u8>>,
+    channel: mpsc::Receiver<watch::Event>,
     callback: Option<Box<dyn FnMut(&Stats) + 'a>>,
 }
 
@@ -263,6 +206,7 @@ impl <'a> Fuzzer <'a> {
             callback: None
         };
 
+        // FIXME: no need to have channel in constructor, just needed in run method
         let sender = tx;
         let copy = fuzzer.path.join("corpus");
         let _thread = thread::spawn(move || {
@@ -319,6 +263,16 @@ impl <'a> Fuzzer <'a> {
 
         corpus.load()?;
 
+        // FIXME: replay corpus members
+        for (_hash, entry) in corpus.members.iter_mut() {
+            tracer.set_state(&context)?;
+            let range = std::cmp::min(entry.data.len(), 0x1000);
+            tracer.write_gva(cr3, params.input, &entry.data[..range])?;
+            let mut trace = tracer.run(trace_params, hook)?;
+            strategy.check_new_coverage(&params, &mut trace);
+            tracer.restore_snapshot()?;
+        }
+
         let mut last_refresh = std::time::Instant::now();
         let mut hint = MutationHint::default();
 
@@ -327,26 +281,43 @@ impl <'a> Fuzzer <'a> {
                 callback(&stats);
             }
 
-            if last_refresh.elapsed() > std::time::Duration::from_secs(1) {
+            if last_refresh.elapsed() > std::time::Duration::from_secs(2) {
                 let path = std::path::Path::new(&self.path).join("hints.json");
                 if let Ok(mutation_hint) = MutationHint::load(path) {
                     hint = mutation_hint;
                 }
 
                 let path = self.path.join("instances").join(format!("{}.json", stats.uuid));
+                stats.updated = Utc::now();
                 stats.save(path)?;
 
                 last_refresh = std::time::Instant::now()
 
             }
         
-            if let Ok(data)  = self.channel.try_recv() {
-                corpus.add(&data)?;
+            if let Ok(event)  = self.channel.try_recv() {
+                match event {
+                    watch::Event::Create { data, .. } => {
+                        // FIXME: need a way to separate files produced by us
+                        tracer.set_state(&context)?;
+                        let range = std::cmp::min(data.len(), 0x1000);
+                        tracer.write_gva(cr3, params.input, &data[..range])?;
+                        let mut trace = tracer.run(trace_params, hook)?;
+                        strategy.check_new_coverage(&params, &mut trace);
+                        tracer.restore_snapshot()?;
+                        corpus.add(data)?;
+                    }
+                    watch::Event::Remove(path) => {
+                        corpus.remove(path)?;
+
+                    }
+                }
             }
 
             strategy.generate_new_input(&mut data, corpus, &mut hint);
 
-            tracer.write_gva(cr3, params.input, &data[..0x1000])?;
+            let range = std::cmp::min(data.len(), 0x1000);
+            tracer.write_gva(cr3, params.input, &data[..range])?;
 
             tracer.set_state(&context)?;
 
@@ -354,7 +325,7 @@ impl <'a> Fuzzer <'a> {
 
             tracer.restore_snapshot()?;
 
-            let new = strategy.check_new_coverage(&params, &mut trace, corpus);
+            let new = strategy.check_new_coverage(&params, &mut trace);
 
             if new > 0 {
                 // save corpus
@@ -429,15 +400,19 @@ mod test {
     }
 
     impl trace::Hook for TestHook {
-        fn setup<T: trace::Tracer>(&self, _tracer: &mut T) {
+        fn setup<T: trace::Tracer>(&mut self, _tracer: &mut T) {
             todo!()
         }
 
-            fn handle_breakpoint<T: trace::Tracer>(&mut self, _tracer: &mut T) -> Result<bool, trace::TracerError> {
+        fn handle_breakpoint<T: trace::Tracer>(&mut self, _tracer: &mut T) -> Result<bool, trace::TracerError> {
             todo!()
         }
 
-            fn handle_trace(&self, _trace: &mut trace::Trace) -> Result<bool, trace::TracerError> {
+        fn handle_trace(&self, _trace: &mut trace::Trace) -> Result<bool, trace::TracerError> {
+            todo!()
+        }
+
+        fn patch_page(&self, _gva: u64) -> bool {
             todo!()
         }
     }
@@ -499,14 +474,14 @@ mod test {
 
         pub fn check_expected_coverage(&self, corpus: &mut Corpus) -> usize {
             let mut max_coverage = 0;
-            for data in corpus.members.values() {
+            for entry in corpus.members.values() {
                 let mut coverage = BTreeSet::new();
                 for (offset, value) in self.expected.iter() {
-                    if data[*offset] == *value {
+                    if entry.data[*offset] == *value {
                         coverage.insert(*offset);
                     }
                 }
-                println!("{:x?}", data);
+                println!("{:x?}", entry.data);
                 println!("coverage is {}", coverage.len());
 
                 max_coverage = std::cmp::max(max_coverage, coverage.len());
@@ -528,7 +503,7 @@ mod test {
             self.index = (self.index + 1) ^ corpus.members.len();
             if let Some(instance) = instance {
                 self.mutator.clear();
-                self.mutator.input(&instance);
+                self.mutator.input(&instance.data);
                 self.mutator.mutate(4);
                 assert_eq!(self.mutator.input.len(), 0x60);
                 data[..self.mutator.input.len()].copy_from_slice(&self.mutator.input[..]);
@@ -542,7 +517,7 @@ mod test {
         // FIXME: type error
         // new coverage ?
         // check new coverage ?
-        fn check_new_coverage(&mut self, _params: &Params, _trace: &mut trace::Trace, _corpus: &mut Corpus) -> usize {
+        fn check_new_coverage(&mut self, _params: &Params, _trace: &mut trace::Trace) -> usize {
 
             let data = &self.mutator.input;
             assert_eq!(data.len(), 0x60);
@@ -628,9 +603,11 @@ mod test {
 
         let mut fuzzer = Fuzzer::new(tmp.path()).unwrap();
 
-        let mut params = Params::default();
-        params.input_size = 0x60;
-        params.max_duration = std::time::Duration::from_millis(60000);
+        let params = Params {
+            input_size: 0x60,
+            max_duration: std::time::Duration::from_millis(60000),
+            ..Default::default()
+        };
 
         let mut tracer = TestTracer::default();
         let context = trace::ProcessorState::default();

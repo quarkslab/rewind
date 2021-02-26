@@ -10,5 +10,11 @@ edition = "2018"
 crossterm = "0.18.2"
 tui = { git = "https://github.com/fdehau/tui-rs", features = ["crossterm"], default-features = false }
 thiserror = "1.0.22"
+memmap = "0.7.0"
+flume = "0.10.0"
+chrono = "0.4.19"
 
 rewind-core = { path = "../rewind-core" }
+rewind-system = { path = "../rewind-system" }
+rewind-snapshot = { path = "../rewind-snapshot" }
+rewind-bochs = { path = "../rewind-bochs" }

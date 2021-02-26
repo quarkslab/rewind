@@ -1,57 +1,80 @@
 
-use std::{collections::BTreeSet, io::BufWriter, sync::RwLock};
-use std::sync::Arc;
+use std::{collections::BTreeSet, fmt::Display, io::BufWriter, str::FromStr};
 
 use std::io::Write;
 use std::convert::TryInto;
 
 use serde::{Serialize, Deserialize};
 
-use crate::{trace, fuzz::{Params, Strategy, Corpus}};
+use crate::{trace, fuzz::{Params, Strategy}, corpus::Corpus};
 
-#[derive(Debug, Default)]
-pub struct RoundRobinBalancer<T: Ord> {
-    pub items: BTreeSet<T>,
-    index: Arc<RwLock<usize>>,
-}
+// #[derive(Debug, Default)]
+// pub struct RoundRobinBalancer<T: Ord> {
+//     pub items: BTreeSet<T>,
+//     index: Arc<RwLock<usize>>,
+// }
 
-impl <T: Ord> RoundRobinBalancer<T> {
+// impl <T: Ord> RoundRobinBalancer<T> {
 
-    pub fn insert(&mut self, item: T) {
-        self.items.insert(item);
-    }
+//     pub fn insert(&mut self, item: T) {
+//         self.items.insert(item);
+//     }
 
-    pub fn rotate(&mut self) -> Option<&T> {
-        let item = self.index.try_write();
-        let item = if let Ok(mut index) = item {
-            *index = (*index + 1) % self.items.len();
+//     pub fn rotate(&mut self) -> Option<&T> {
+//         if self.items.is_empty() {
+//             return None
+//         }
+//         let item = self.index.try_write();
+//         let item = if let Ok(mut index) = item {
+//             *index = (*index + 1) % self.items.len();
 
-            self.items.iter().nth(*index)
-        } else { None };
-        item
-    }
-}
+//             self.items.iter().nth(*index)
+//         } else { None };
+//         item
+//     }
+
+//     pub fn current(&self) -> Option<&T> {
+//         if self.items.is_empty() {
+//             return None
+//         }
+//         let item = self.index.try_write();
+//         let item = if let Ok(index) = item {
+//             self.items.iter().nth(*index)
+//         } else { None };
+//         item
+//     }
+// }
 
 #[derive(Default)]
 pub struct BasicStrategy {
     pub mutator: Mutator,
     pub coverage: BTreeSet<u64>,
-    balancer: RoundRobinBalancer<u64>,
+    // balancer: RoundRobinBalancer<u64>,
+    range: Option<Range>,
 }
 
 impl BasicStrategy {
 
-    pub fn new() -> Self {
-        let mutator = Mutator::new().input_size(0x60);
+    pub fn new(input_size: usize) -> Self {
+        let mutator = Mutator::new().input_size(input_size);
 
         Self {
             mutator,
             coverage: BTreeSet::new(),
-            balancer: RoundRobinBalancer::default(),
+            // balancer: RoundRobinBalancer::default(),
+            range: None,
         }
     }
 
+    pub fn range(&mut self, range: Range) {
+        let size = range.size();
+        self.range = Some(range);
+        self.mutator.input.resize(size, 0u8);
+    }
+
 }
+
+// FIXME: should strategy own the corpus ?
 
 impl Strategy for BasicStrategy {
 
@@ -60,33 +83,55 @@ impl Strategy for BasicStrategy {
         // self.mutator.accessed = rules.offsets.iter().map(|o| *o as usize).collect();
         // self.mutator.immediate_values = rules.immediates.iter().map(|o| o.to_le_bytes().to_vec()).collect();
 
-        corpus.members.iter().for_each(|(name, _data)| {
-            self.balancer.insert(*name);
-        });
+        // need to sync corpus
+        // FIXME: impl round robin for corpus instead ?
+        // corpus.members.iter().for_each(|(name, _data)| {
+        //     self.balancer.insert(*name);
+        // });
 
-        if let Some(key) = self.balancer.rotate() {
+        // let to_remove: Vec<u64> = self.balancer.items.iter().filter(|&name| {
+        //     !corpus.members.contains_key(name)
+        // }).cloned().collect();
 
-            let instance = corpus.members.get(key);
-            
-            if let Some(instance) = instance {
-                self.mutator.clear();
-                self.mutator.input(&instance);
-                self.mutator.mutate(4);
-                data[..self.mutator.input.len()].copy_from_slice(&self.mutator.input[..]);
-            } 
+        // to_remove.iter().for_each(|name| {
+        //     self.balancer.items.remove(name);
+        // });
+
+        let low = if let Some(range) = &self.range {
+            range.low
+        } else {
+            0
+        };
+
+        let high = if let Some(range) = &self.range {
+            range.high
+        } else {
+            self.mutator.input.len()
+        };
+
+        if let Some((_hash, entry)) = corpus.rotate() {
+            // FIXME: use range 
+            // input size should be range size
+            // data should be rewritten with range
+            self.mutator.clear();
+            let data_len = data.len();
+            data[..].copy_from_slice(&entry.data[..data_len]);
+            self.mutator.input(&entry.data[low..high]);
+            self.mutator.mutate(4);
+            data[low..high].copy_from_slice(&self.mutator.input[..]);
         } else {
             self.mutator.mutate(4);
-            data[..self.mutator.input.len()].copy_from_slice(&self.mutator.input[..]);
+            data[low..high].copy_from_slice(&self.mutator.input[..]);
         }
     }
 
     // FIXME: use coverage to change corpus choice strategy ?
-    fn check_new_coverage(&mut self, _params: &Params, trace: &mut trace::Trace, _corpus: &mut Corpus) -> usize {
+    fn check_new_coverage(&mut self, _params: &Params, trace: &mut trace::Trace) -> usize {
         let new = trace.seen.difference(&self.coverage).count();
 
         if new > 0 {
 
-        }
+        } 
 
         self.coverage.append(&mut trace.seen);
 
@@ -99,6 +144,74 @@ impl Strategy for BasicStrategy {
 
 }
 
+#[derive(Debug, Clone)]
+pub struct Range {
+    low: usize,
+    high: usize,
+}
+
+impl Range {
+
+    pub fn new() -> Self {
+        Self {
+            low: 0,
+            high: 1
+        }
+    }
+
+    pub fn low(mut self, low: usize) -> Self {
+        self.low = low;
+        self
+    }
+
+    pub fn high(mut self, high: usize) -> Self {
+        self.high = high;
+        self
+    }
+
+    pub fn size(&self) -> usize {
+        self.high - self.low
+    }
+
+}
+
+impl Default for Range {
+
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FromStr for Range {
+
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parsed: Vec<u16> = s
+            // .trim_matches(|c| c == '[' || c == ']')
+            .split('-')
+            .filter_map(|n| n.trim().parse::<u16>().ok())
+            .collect();
+
+        if parsed.len() != 2 {
+            return Err("bad range")
+        }
+
+        let range = Self {
+            low: parsed[0] as usize,
+            high: parsed[1] as usize
+        };
+
+        Ok(range)
+    }
+}
+
+impl Display for Range {
+
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.low, self.high)
+    }
+}
 
 /// A basic random number generator based on xorshift64 with 64-bits of state
 struct Rng {

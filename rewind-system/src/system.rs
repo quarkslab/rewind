@@ -161,10 +161,11 @@ impl <'a> System <'a>
         }
 
         let name = String::from_utf8_lossy(&buf[0x18..size-1]);
-        let mut info = pe::DebugInformation::default();
-        info.name = name.to_string();
-        info.guid = debug.guid;
-        info.age = debug.age;
+        let info = pe::DebugInformation {
+            name: name.to_string(),
+            guid: debug.guid,
+            age: debug.age,
+        };
         Ok(info)
 
     }

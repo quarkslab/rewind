@@ -11,5 +11,5 @@ members = [
 ]
 
 exclude = [
-    "vendor/bochscpu",
+    "vendor",
 ]

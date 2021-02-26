@@ -1,10 +1,15 @@
-use std::fs::File;
+use std::{fs::File, path::PathBuf};
 use std::io::prelude::*;
 use std::sync::mpsc;
 
 use notify::Watcher;
 
-pub fn watch<S>(sender: &mpsc::Sender<Vec<u8>>, path: S) -> notify::Result<()>
+pub enum Event {
+    Create {path: PathBuf, data: Vec<u8>},
+    Remove(PathBuf)
+}
+
+pub fn watch<S>(sender: &mpsc::Sender<Event>, path: S) -> notify::Result<()>
 where S: Into<std::path::PathBuf> {
     // Create a channel to receive the events.
     // let (tx, rx) = unbounded();
@@ -22,14 +27,32 @@ where S: Into<std::path::PathBuf> {
         match rx.recv() {
             Ok(event) => {
                 // info!("received event {:?}", event);
-                if let notify::DebouncedEvent::Create(path) = event {
-                    let mut file = File::open(&path)?;
-                    let mut data = Vec::new();
-                    file.read_to_end(&mut data)?;
-                    sender.send(data).map_err(|e| {
-                        let e = format!("{:?}", e);
-                        notify::Error::Generic(e)
-                    })?;
+                match event {
+                    notify::DebouncedEvent::Create(path) => {
+                        let mut file = File::open(&path)?;
+                        let mut data = Vec::new();
+                        file.read_to_end(&mut data)?;
+                        let event = Event::Create {
+                            path,
+                            data
+                        };
+                        sender.send(event).map_err(|e| {
+                            let e = format!("{:?}", e);
+                            notify::Error::Generic(e)
+                        })?;
+                    }
+
+                    notify::DebouncedEvent::Remove(path) => {
+                        let event = Event::Remove(path);
+                        sender.send(event).map_err(|e| {
+                            let e = format!("{:?}", e);
+                            notify::Error::Generic(e)
+                        })?;
+                    }
+
+                    _ => {
+
+                    }
                 }
             },
             Err(err) => {

@@ -1,10 +1,17 @@
-use std::{io::Write, path::PathBuf};
+use std::{io::{Read, Write}, path::PathBuf};
 use std::collections::{HashMap, BTreeSet};
+use std::thread;
+use std::sync::mpsc;
+use std::time::Instant;
 
-use fuzz::Stats;
+use event::KeyEvent;
 use thiserror::Error;
 
-use rewind_core::fuzz;
+use memmap::MmapOptions;
+
+use rewind_core::{fuzz, mutation, trace::{self, Tracer}, watch};
+use rewind_system::{system, pdbstore};
+use rewind_snapshot::DumpSnapshot;
 
 pub use crossterm::{
     event::{self, Event, KeyCode, EnableMouseCapture, DisableMouseCapture},
@@ -27,6 +34,9 @@ pub use tui::{
     Terminal
 };
 
+use crate::widget::{ActiveWidget, CorpusFile, Function};
+use crate::app::App;
+
 #[derive(Error, Debug)]
 pub enum TuiError {
     #[error("io error: {0}")]
@@ -34,276 +44,32 @@ pub enum TuiError {
 
     #[error("terminal error: {0}")]
     TermError(#[from] crossterm::ErrorKind),
+    
+    #[error("channel error: {0}")]
+    FlumeError(#[from] flume::SendError<Control>),
 
+    #[error("channel error: {0}")]
+    FlumeError2(#[from] flume::SendError<Message>),
 
+    #[error("channel error: {0}")]
+    FlumeRecvError(#[from] flume::RecvError),
+
+    #[error("core error: {0}")]
+    CoreError(#[from] rewind_core::error::GenericError),
+
+    #[error("store error: {0}")]
+    StoreError(#[from] rewind_system::pdbstore::StoreError),
+
+    #[error("system error: {0}")]
+    SystemError(#[from] rewind_system::system::SystemError),
+
+    #[error("snapshot error: {0}")]
+    SnapshotError(#[from] rewind_core::snapshot::SnapshotError),
+
+    #[error("tracer error: {0}")]
+    TracerError(#[from] rewind_core::trace::TracerError),
 }
 
-pub enum TuiEvent<I> {
-    Input(I),
-    Tick,
-    Instances(HashMap<std::path::PathBuf, fuzz::Stats>),
-    Log(String),
-    Coverage(HashMap<String, Function>),
-    Corpus(CorpusFile),
-    Crash(CorpusFile),
-}
-
-
-pub struct StatsWidget {
-    pub coverage: u64
-
-}
-
-impl StatsWidget {
-
-    fn new() -> Self {
-        Self {
-            coverage: 0
-        }
-    }
-
-}
-
-
-struct InstanceWidget {
-    state: TableState,
-    instances: Vec<fuzz::Stats>,
-}
-
-impl InstanceWidget {
-    fn new() -> Self {
-        Self {
-            state: TableState::default(),
-            instances: Vec::new(),
-        }
-    }
-
-    pub fn next(&mut self) {
-        let i = match self.state.selected() {
-            Some(i) => {
-                if i >= self.instances.len() - 1 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        self.state.select(Some(i));
-    }
-
-    pub fn previous(&mut self) {
-        let i = match self.state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    self.instances.len() - 1
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        self.state.select(Some(i));
-    }
-}
- 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub struct CorpusFile {
-    pub path: std::path::PathBuf,
-    pub seen: u64,
-    pub count: u64,
-    // instructions count
-    // time
-}
-
-impl CorpusFile {
-
-    pub fn new<P>(path: P) -> Self
-    where P: Into<std::path::PathBuf> {
-        Self {
-            path: path.into(),
-            seen: 0,
-            count: 0
-        }
-    }
-}
-
-struct CorpusWidget {
-    state: TableState,
-    files: Vec<CorpusFile>,
-}
-
-impl CorpusWidget {
-    fn new() -> Self {
-        Self {
-            state: TableState::default(),
-            files: Vec::new(),
-        }
-    }
-
-    pub fn next(&mut self) {
-        let i = match self.state.selected() {
-            Some(i) => {
-                if i >= self.files.len() - 1 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        self.state.select(Some(i));
-    }
-
-    pub fn previous(&mut self) {
-        let i = match self.state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    self.files.len() - 1
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        self.state.select(Some(i));
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub struct Function {
-    module: String,
-    name: String,
-    pub coverage: u64,
-    size: u64,
-}
-
-impl Function {
-
-    pub fn new(module: String, name: String, coverage: u64) -> Self {
-        Self {
-            module,
-            name,
-            coverage,
-            size: 0 
-        }
-    }
-}
-
-impl std::fmt::Display for Function {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}!{}", self.module, self.name)
-    }
-}
-
-struct CoverageWidget {
-    state: TableState,
-    functions: Vec<Function>,
-}
-
-impl CoverageWidget {
-    fn new() -> Self {
-        Self {
-            state: TableState::default(),
-            functions: Vec::new(),
-        }
-    }
-
-    pub fn next(&mut self) {
-        if self.functions.is_empty() {
-            return
-        }
-        let i = match self.state.selected() {
-            Some(i) => {
-                if i >= self.functions.len() - 1 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        self.state.select(Some(i));
-    }
-
-    pub fn previous(&mut self) {
-        if self.functions.is_empty() {
-            return
-        }
-        let i = match self.state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    self.functions.len() - 1
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        self.state.select(Some(i));
-    }
-}
-struct CrashesWidget {
-    state: TableState,
-    files: Vec<CorpusFile>,
-}
-
-impl CrashesWidget {
-    fn new() -> Self {
-        Self {
-            state: TableState::default(),
-            files: Vec::new(),
-        }
-    }
-
-    pub fn next(&mut self) {
-        let i = match self.state.selected() {
-            Some(i) => {
-                if i >= self.files.len() - 1 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        self.state.select(Some(i));
-    }
-
-    pub fn previous(&mut self) {
-        let i = match self.state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    self.files.len() - 1
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        self.state.select(Some(i));
-    }
-}
-
-
-enum Widget {
-    Instances,
-    Corpus,
-    Coverage,
-    Crash,
-}
-
-impl Widget {
-
-    fn next(&self) -> Self {
-        match self {
-            Self::Instances => Self::Corpus,
-            Self::Corpus => Self::Coverage,
-            Self::Coverage => Self::Crash,
-            Self::Crash => Self::Instances,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct Collection {
@@ -332,211 +98,6 @@ impl Default for Collection {
     }
 }
 
-struct LogsWidget {
-    state: ListState,
-    items: Vec<String>,
-}
-
-impl LogsWidget {
-    fn new() -> Self {
-        Self {
-            state: ListState::default(),
-            items: Vec::new(),
-        }
-    }
-
-    pub fn next(&mut self) {
-        let i = match self.state.selected() {
-            Some(i) => {
-                if i >= self.items.len() - 1 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        self.state.select(Some(i));
-    }
-
-    pub fn _previous(&mut self) {
-        let i = match self.state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    self.items.len() - 1
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        self.state.select(Some(i));
-    }
-}
-
-pub struct App {
-    stats_widget: StatsWidget,
-    instances_widget: InstanceWidget,
-    corpus_widget: CorpusWidget,
-    coverage_widget: CoverageWidget,
-    crashes_widget: CrashesWidget,
-    logs_widget: LogsWidget,
-    active_widget: Widget,
-    // points: Vec<(f64, f64)>,
-    // ticks: usize,
-}
-
-impl App {
-
-    pub fn new() -> Self {
-        Self {
-            stats_widget: StatsWidget::new(),
-            instances_widget: InstanceWidget::new(),
-            corpus_widget: CorpusWidget::new(),
-            coverage_widget: CoverageWidget::new(),
-            crashes_widget: CrashesWidget::new(),
-            logs_widget: LogsWidget::new(),
-            active_widget: Widget::Instances,
-            // points: Vec::new(),
-            // ticks: 0,
-        }
-
-    }
-
-    pub fn on_key(&mut self, _c: char) {
-    }
-
-    pub fn on_collect(&mut self, functions: HashMap<String, Function>) {
-        // self.stats_widget.coverage = collection.coverage.len() as u64;
-
-        self.coverage_widget.functions.clear();
-        self.coverage_widget.functions.extend(functions.values().cloned());
-        self.coverage_widget.functions.sort();
-
-    }
-
-    pub fn on_corpus(&mut self, file: CorpusFile) {
-        self.corpus_widget.files.push(file);
-        self.corpus_widget.files.sort_by(|a, b| { b.count.cmp(&a.count) });
-    }
-
-    pub fn on_crash(&mut self, file: CorpusFile) {
-        self.crashes_widget.files.push(file);
-        self.crashes_widget.files.sort_by(|a, b| { b.count.cmp(&a.count) });
-    }
-
-    pub fn on_instance(&mut self, instances: HashMap<PathBuf, Stats>) {
-        self.instances_widget.instances.clear();
-        self.instances_widget.instances.extend(instances.values().cloned());
-        // FIXME: short by time, remove old instances ?
-        self.instances_widget.instances.sort_by(|a, b| { a.uuid.cmp(&b.uuid) });
-    }
-
-    pub fn on_log(&mut self, log: String) {
-        self.logs_widget.items.push(log);
-        if self.logs_widget.items.len() > 50 {
-            self.logs_widget.items.remove(0);
-        }
-        self.logs_widget.next();
-    }
-
-    pub fn on_tick(&mut self) {
-
-    }
-
-    pub fn on_tab(&mut self) {
-        let widget = self.active_widget.next();
-        self.active_widget = widget;
-
-    }
-
-    pub fn on_up(&mut self) {
-        match self.active_widget {
-            Widget::Instances => {
-                self.instances_widget.previous()
-            },
-            Widget::Corpus => {
-                self.corpus_widget.previous()
-            },
-            Widget::Coverage => {
-                self.coverage_widget.previous()
-            },
-            Widget::Crash => {
-                self.crashes_widget.previous()
-            }
-        }
-
-    }
-
-    pub fn on_page_up(&mut self) {
-        match self.active_widget {
-            Widget::Instances => {
-                self.instances_widget.previous()
-            },
-            Widget::Corpus => {
-                self.corpus_widget.previous()
-            },
-            Widget::Coverage => {
-                self.coverage_widget.previous()
-            },
-            Widget::Crash => {
-                self.crashes_widget.previous()
-            }
-        }
-
-    }
-
-    pub fn on_down(&mut self) {
-        match self.active_widget {
-            Widget::Instances => {
-                self.instances_widget.next()
-            },
-            Widget::Corpus => {
-                self.corpus_widget.next()
-            },
-            Widget::Coverage => {
-                self.coverage_widget.next()
-            },
-            Widget::Crash => {
-                self.crashes_widget.next()
-            }
-        }
-    }
-
-    pub fn on_page_down(&mut self) {
-        match self.active_widget {
-            Widget::Instances => {
-                self.instances_widget.next()
-            },
-            Widget::Corpus => {
-                self.corpus_widget.next()
-            },
-            Widget::Coverage => {
-                self.coverage_widget.next()
-            },
-            Widget::Crash => {
-                self.crashes_widget.next()
-            }
-        }
-    }
-
-    pub fn on_right(&mut self) {
-
-    }
-
-    pub fn on_left(&mut self) {
-
-    }
-
-}
-
-impl Default for App {
-
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 pub fn setup_terminal() -> Result<std::io::Stdout, TuiError> {
     let mut stdout_val = std::io::stdout();
     execute!(stdout_val, EnterAlternateScreen, EnableMouseCapture)?;
@@ -559,16 +120,16 @@ pub fn cleanup_terminal(
     Ok(())
 }
 
-pub fn draw(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, app: &mut App) {
+fn draw(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, app: &mut App) {
     let chunks = Layout::default()
         .constraints(
             [
-                Constraint::Percentage(5),
+                Constraint::Percentage(6),
+                Constraint::Percentage(10),
                 Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(15),
+                Constraint::Percentage(30),
+                Constraint::Percentage(17),
+                Constraint::Percentage(17),
             ]
             .as_ref(),
         )
@@ -648,12 +209,12 @@ fn draw_instances(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
     });
 
     let border_type = match app.active_widget {
-        Widget::Instances => BorderType::Thick,
+        ActiveWidget::Instances => BorderType::Thick,
         _ => BorderType::Plain
     };
  
     let title_style = match app.active_widget {
-        Widget::Instances => Style::default().add_modifier(Modifier::BOLD),
+        ActiveWidget::Instances => Style::default().add_modifier(Modifier::BOLD),
         _ => Style::default()
     };
 
@@ -697,13 +258,14 @@ fn draw_corpus(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app
                       ])
     });
 
+    // FIXME: move this to a function
     let border_type = match app.active_widget {
-        Widget::Corpus => BorderType::Thick,
+        ActiveWidget::Corpus => BorderType::Thick,
         _ => BorderType::Plain
     };
 
     let title_style = match app.active_widget {
-        Widget::Corpus => Style::default().add_modifier(Modifier::BOLD),
+        ActiveWidget::Corpus => Style::default().add_modifier(Modifier::BOLD),
         _ => Style::default()
     };
 
@@ -801,12 +363,12 @@ fn draw_functions(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
     });
 
     let border_type = match app.active_widget {
-        Widget::Coverage => BorderType::Thick,
+        ActiveWidget::Coverage => BorderType::Thick,
         _ => BorderType::Plain
     };
 
     let title_style = match app.active_widget {
-        Widget::Coverage => Style::default().add_modifier(Modifier::BOLD),
+        ActiveWidget::Coverage => Style::default().add_modifier(Modifier::BOLD),
         _ => Style::default()
     };
 
@@ -845,12 +407,12 @@ fn draw_crashes(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, ap
     });
 
     let border_type = match app.active_widget {
-        Widget::Crash => BorderType::Thick,
+        ActiveWidget::Crash => BorderType::Thick,
         _ => BorderType::Plain
     };
 
     let title_style = match app.active_widget {
-        Widget::Crash => Style::default().add_modifier(Modifier::BOLD),
+        ActiveWidget::Crash => Style::default().add_modifier(Modifier::BOLD),
         _ => Style::default()
     };
 
@@ -902,4 +464,415 @@ fn draw_logs(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app: 
     let logs = List::new(logs).block(block);
     f.render_stateful_widget(logs, area, &mut app.logs_widget.state);
 
+}
+
+fn replay_file<H: trace::Hook>(tx: &flume::Sender<Message>,
+        path: &std::path::Path,
+        tracer: &mut rewind_bochs::BochsTracer<DumpSnapshot>,
+        context: &trace::ProcessorState,
+        trace_params: &trace::Params,
+        fuzz_params: &fuzz::Params) -> Result<trace::Trace, TuiError> {
+
+    tx.send(Message::Log(format!("replaying input {}", path.display())))?;
+
+    let mut file = std::fs::File::open(&path)?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
+
+    let cr3 = context.cr3;
+
+    match Tracer::write_gva(tracer, cr3, fuzz_params.input, &data) {
+        Ok(()) => {}
+        Err(e) => {
+            return Err(TuiError::TracerError(e));
+        }
+    }
+
+    tracer.set_state(&context)?;
+
+    let mut hook = H::default();
+    hook.setup(tracer);
+
+    let start = Instant::now();
+
+    let mut trace = tracer.run(&trace_params, &mut hook)?;
+
+    let end = Instant::now();
+    let t = end - start;
+
+    let pages = tracer.get_mapped_pages()?;
+    let _mem = rewind_core::helpers::convert((pages * 0x1000) as f64);
+   
+    tx.send(Message::Log(format!("executed {} instruction(s) in {:?} ({:?})", trace.coverage.len(), t, trace.status)))?;
+    // tx.send(Message::Log(format!("seen {} unique address(es)", trace.seen.len())))?;
+    // tx.send(Message::Log(format!("mapped {} page(s) ({})", pages, mem)))?;
+
+    hook.handle_trace(&mut trace)?;
+
+    let _pages = tracer.restore_snapshot()?;
+    // tx.send(Message::Log(format!("{:?} page(s) were modified", pages)))?;
+
+    Ok(trace)
+
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_coverage(workdir: &PathBuf, system: &system::System, store: &mut pdbstore::PdbStore, corpus_path: PathBuf, fuzz_params: &fuzz::Params, mut trace: trace::Trace, collection: &mut Collection, hints: &mut mutation::MutationHint, tx: &flume::Sender<Message> ) -> Result<(), TuiError> {
+
+    let mut corpus_file = CorpusFile::new(corpus_path.file_name().unwrap());
+    corpus_file.seen = trace.seen.len() as u64;
+    corpus_file.count = trace.coverage.len() as u64;
+
+    let functions = collection.functions.clone();
+    tx.send(Message::Coverage(functions))?;
+
+    hints.immediates.append(&mut trace.immediates);
+    let address = fuzz_params.input;
+    let size = fuzz_params.input_size;
+    let filtered = trace.mem_access.iter()
+        .filter(|a| {
+            a.1 >= address && a.1 < address + size
+        })
+        .map(|a| {
+            a.1 - address
+        });
+
+    hints.offsets.extend(filtered);
+
+    if trace.seen.is_subset(&collection.coverage) {
+        tx.send(Message::Log(format!("removing {}", corpus_path.display())))?;
+        std::fs::remove_file(&corpus_path)?;
+    } else {
+        match trace.status {
+            trace::EmulationStatus::Success => {
+                tx.send(Message::Corpus(corpus_file))?;
+            },
+            _ => {
+                tx.send(Message::Crash(corpus_file))?;
+            }
+        }
+
+        parse_trace(collection, &mut trace, &system, store)?;
+        trace.save(workdir.join("traces").join(format!("{}.json", corpus_path.file_name().unwrap().to_str().unwrap())))?;
+    }
+
+    Ok(())
+}
+
+fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>, tx: flume::Sender<Message>) -> Result<(), TuiError> {
+    loop {
+
+        let control = control_rx.recv()?;
+
+        match control {
+            Control::Start((workdir, store)) => {
+                let input_path = workdir.join("params.json");
+                let fuzz_params = fuzz::Params::load(&input_path)?;
+
+                let snapshot_path = &fuzz_params.snapshot_path;
+
+                let dump_path = snapshot_path.join("mem.dmp");
+
+                let fp = std::fs::File::open(&dump_path)?;
+                let buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+                let snapshot = DumpSnapshot::new(&buffer)?;
+
+                let context_path = snapshot_path.join("context.json");
+                let context = trace::ProcessorState::load(&context_path)?;
+
+                let params_path = snapshot_path.join("params.json");
+                let trace_params = trace::Params::load(&params_path)?;
+
+                // trace_params.max_duration = std::time::Duration::from_secs(args.max_time);
+
+                let mut tracer = rewind_bochs::BochsTracer::new(&snapshot);
+
+                let mut system = system::System::new(&snapshot)?;
+                system.load_modules()?;
+
+                let path = &store;
+                if !path.exists() {
+                    std::fs::create_dir(&path)?;
+                    std::fs::create_dir(path.join("binaries"))?;
+                    std::fs::create_dir(path.join("symbols"))?;
+                }
+
+                let mut store = pdbstore::PdbStore::new(path)?;
+
+                let mut hints = mutation::MutationHint::new();
+
+                let mut collection = Collection::new();
+
+                tx.send(Message::Log("loading corpus".to_string()))?;
+                let path = workdir.join("corpus");
+                let mut entries = std::fs::read_dir(&path)?
+                    .map(|res| res.map(|e| e.path()))
+                    .collect::<Result<Vec<_>, std::io::Error>>()?;
+
+                let path = workdir.join("crashes");
+                let crash_entries = std::fs::read_dir(&path)?
+                    .map(|res| res.map(|e| e.path()))
+                    .collect::<Result<Vec<_>, std::io::Error>>()?;
+
+                entries.extend(crash_entries);
+                entries.sort();
+
+                for path in entries {
+                    if path.extension() == Some(std::ffi::OsStr::new("bin")) {
+                        let trace = replay_file::<H>(&tx, &path, &mut tracer, &context, &trace_params, &fuzz_params)?;
+                        update_coverage(&workdir, &system, &mut store, path, &fuzz_params, trace, &mut collection, &mut hints, &tx)?;
+                    }
+                }
+
+                tx.send(Message::TotalCoverage(collection.coverage.len()))?;
+                tx.send(Message::Log(format!("updating mutation hints: immediates {}, offsets {}", hints.immediates.len(), hints.offsets.len())))?;
+                // tx.send(Message::Log(format!("unique addresses {}, {} modules, {} functions", collection.coverage.len(), collection.modules.len(), collection.functions.len())))?;
+                let path = workdir.join("hints.json");
+                hints.save(&path)?;
+                    
+                let (watcher_tx, watcher_rx) = mpsc::channel();
+                let corpus_path = workdir.join("corpus");
+                thread::spawn(move || {
+                    loop {
+                        let result = watch::watch(&watcher_tx, &corpus_path);
+                        println!("{:?}", result);
+                    }
+                });
+
+                loop {
+                    if let Ok(event)  = watcher_rx.recv() {
+                        match event {
+                            watch::Event::Create { path, .. } => {
+                                let trace = replay_file::<H>(&tx, &path, &mut tracer, &context, &trace_params, &fuzz_params)?;
+                                update_coverage(&workdir, &system, &mut store, path, &fuzz_params, trace, &mut collection, &mut hints, &tx)?;
+                                tx.send(Message::TotalCoverage(collection.coverage.len()))?;
+                                tx.send(Message::Log(format!("updating mutation hints: immediates {}, offsets {}", hints.immediates.len(), hints.offsets.len())))?;
+                                // tx.send(Message::Log(format!("unique addresses {}, {} modules, {} functions", collection.coverage.len(), collection.modules.len(), collection.functions.len())))?;
+                                let path = workdir.join("hints.json");
+                                hints.save(&path)?;
+                            }
+                            watch::Event::Remove(_path) => {
+
+                            }
+                        }
+                    }
+                }
+            },
+            _ => {
+                tx.send(Message::Log("stopping coverage thread".to_string()))?;
+                return Ok(())
+            }
+        }
+
+    }
+
+}
+
+#[derive(Debug)]
+pub enum Control {
+    Start((std::path::PathBuf, std::path::PathBuf)),
+    Stop,
+}
+
+#[derive(Debug)]
+pub enum Message {
+    Input(KeyEvent),
+    Tick,
+    Instances(HashMap<std::path::PathBuf, fuzz::Stats>),
+    Log(String),
+    Coverage(HashMap<String, Function>),
+    TotalCoverage(usize),
+    Corpus(CorpusFile),
+    Crash(CorpusFile),
+}
+
+fn start_coverage_collector_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>, tx: flume::Sender<Message>) {
+    thread::spawn( move || {
+        let result = collect_coverage_thread::<H>(control_rx, tx.clone());
+        tx.send(Message::Log(format!("thread returned {:?}", result))).unwrap();
+    });
+}
+
+fn start_instances_collector_thread(control_rx: flume::Receiver<Control>, tx: flume::Sender<Message>) {
+    thread::spawn( move || {
+        let result = collect_instances_thread(control_rx, tx.clone());
+        tx.send(Message::Log(format!("thread returned {:?}", result))).unwrap();
+    });
+ 
+}
+
+fn collect_instances_thread(control_rx: flume::Receiver<Control>, tx: flume::Sender<Message>) -> Result<(), TuiError> {
+    loop {
+        let control = control_rx.recv()?;
+        match control {
+            Control::Start((workdir, _store)) => {
+                loop {
+                    // tx.send(Message::Log("refreshing instances list".to_string()))?;
+                    let path = workdir.join("instances");
+                    let mut entries = std::fs::read_dir(&path)?
+                        .map(|res| res.map(|e| e.path()))
+                        .collect::<Result<Vec<_>, std::io::Error>>()?;
+
+                    entries.sort();
+
+                    let mut instances = HashMap::new();
+                    for path in entries {
+                        if path.extension() == Some(std::ffi::OsStr::new("json")) {
+                            let stats = fuzz::Stats::load(&path)?;
+
+                            let filename = path.to_path_buf();
+                            instances.insert(filename, stats);
+                        }
+                    }
+                        
+                    tx.send(Message::Instances(instances))?;
+
+                    if !control_rx.is_empty() {
+                        break
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+
+            },
+            _ => {
+                tx.send(Message::Log("stopping thread".to_string()))?;
+                return Ok(())
+            }
+        }
+ 
+    }
+}
+
+
+
+pub fn display_tui<H: trace::Hook>(workdir: PathBuf, store: PathBuf) -> Result<(), TuiError> {
+    let (tx, rx) = flume::unbounded();
+    let (control_instance_tx, control_instance_rx) = flume::unbounded();
+    let (control_coverage_tx, control_coverage_rx) = flume::unbounded();
+
+    start_coverage_collector_thread::<H>(control_coverage_rx, tx.clone());
+    start_instances_collector_thread(control_instance_rx, tx.clone());
+
+    control_coverage_tx.send(Control::Start((workdir.clone(), store.clone())))?;
+    control_instance_tx.send(Control::Start((workdir, store)))?;
+
+    let stdout_val = setup_terminal()?;
+
+    let backend = CrosstermBackend::new(stdout_val);
+
+    let mut terminal = Terminal::new(backend)?;
+
+    // let tick_rate = Duration::from_millis(50);
+
+    //polling thread
+    thread::spawn(move || {
+        // let mut last_tick = Instant::now();
+        loop {
+            // poll for tick rate duration, if no events, sent tick event.
+            // let timeout = tick_rate
+                // .checked_sub(last_tick.elapsed())
+                // .unwrap_or_else(|| Duration::from_secs(0));
+
+            if let Event::Key(key) = event::read().unwrap() {
+                tx.send(Message::Input(key)).unwrap();
+            }
+            // if last_tick.elapsed() >= tick_rate {
+                // tx.send(Message::Tick).unwrap();
+                // last_tick = Instant::now();
+            // }
+        }
+    });
+
+    let mut app = App::new();
+
+    terminal.clear()?;
+    terminal.hide_cursor()?;
+
+     loop {
+        terminal.draw(|f| draw(f, &mut app))?;
+        match rx.recv()? {
+            Message::Input(event) => match event.code {
+                KeyCode::Char('q') => {
+                    cleanup_terminal(&mut terminal)?;
+                    break;
+                }
+                KeyCode::Char(c) => app.on_key(c),
+                KeyCode::Left => app.on_left(),
+                KeyCode::Right => app.on_right(),
+                KeyCode::Tab => app.on_tab(),
+                KeyCode::Up => app.on_up(),
+                KeyCode::Down => app.on_down(),
+                KeyCode::PageUp => app.on_page_up(),
+                KeyCode::PageDown => app.on_page_down(),
+                _ => {}
+            },
+            Message::Tick => {
+                app.on_tick();
+            },
+            Message::Coverage(c) => {
+                app.on_collect(c);
+            },
+            Message::TotalCoverage(size) => {
+                app.on_total_coverage(size);
+            }
+            Message::Log(l) => {
+                app.on_log(l)
+            },
+            Message::Instances(i) => {
+                app.on_instance(i)
+            },
+            Message::Corpus(i) => {
+                app.on_corpus(i)
+            },
+            Message::Crash(i) => {
+                app.on_crash(i)
+            },
+        }
+
+    }
+
+    Ok(())
+}
+
+// FIXME: to rename => collect trace coverage, should return Coverage, should be in system
+pub fn parse_trace(collection: &mut Collection, trace: &mut trace::Trace, system: &system::System, store: &mut pdbstore::PdbStore) -> Result<(), TuiError> {
+
+    for &address in trace.seen.difference(&collection.coverage) {
+        if let Some(module) = system.get_module_by_address(address) {
+            *collection.modules.entry(module.name.clone()).or_insert_with(|| {
+
+                // FIXME: need a fn in system.rs
+                if let Ok(info) = system.get_file_information(module) {
+                    if store.download_pe(&module.name, &info).is_ok() {
+
+                    }
+                }
+
+                if let Ok(info) = system.get_debug_information(module) {
+                    let (name, guid) = info.into();
+                    if store.download_pdb(&name, &guid).is_ok() && store.load_pdb(module.base, &name, &guid).is_ok() {
+
+                    }
+                }
+
+                0
+            }) += 1;
+
+            if let Some(symbol) = store.resolve_address(address) {
+                // FIXME: get size of symbol and size of func
+                let name = format!("{}!{}", symbol.module, symbol.name);
+                collection.functions.entry(name)
+                    .and_modify(|f| f.coverage += 1)
+                    .or_insert_with(|| {
+                        Function::new(symbol.module, symbol.name, 1)
+                    });
+            }
+        }
+    }
+
+    collection.coverage.append(&mut trace.seen);
+
+    Ok(())
 }

@@ -397,12 +397,13 @@ pub trait Tracer {
 
 
 pub trait Hook: Default {
-    fn setup<T: Tracer + mem::X64VirtualAddressSpace>(&self, tracer: &mut T);
+    fn setup<T: Tracer + mem::X64VirtualAddressSpace>(&mut self, tracer: &mut T);
 
     fn handle_breakpoint<T: Tracer + mem::X64VirtualAddressSpace>(&mut self, tracer: &mut T) -> Result<bool, TracerError>;
 
     fn handle_trace(&self, trace: &mut Trace) -> Result<bool, TracerError>;
 
+    fn patch_page(&self, gva: u64) -> bool;
 }
 
 #[derive(Default)]
@@ -411,7 +412,7 @@ pub struct NoHook {
 }
 
 impl Hook for NoHook {
-    fn setup<T: Tracer + mem::X64VirtualAddressSpace>(&self, _tracer: &mut T) {
+    fn setup<T: Tracer + mem::X64VirtualAddressSpace>(&mut self, _tracer: &mut T) {
         
     }
 
@@ -421,5 +422,9 @@ impl Hook for NoHook {
 
     fn handle_trace(&self, _trace: &mut Trace) -> Result<bool, TracerError> {
         Ok(true)
+    }
+
+    fn patch_page(&self, _gva: u64) -> bool {
+        true
     }
 }

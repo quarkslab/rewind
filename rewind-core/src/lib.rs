@@ -30,4 +30,7 @@ pub mod helpers;
 pub mod mutation;
 
 #[doc(hidden)]
+pub mod corpus;
+
+#[doc(hidden)]
 pub mod error;

@@ -88,16 +88,20 @@ where S: Snapshot + mem::X64VirtualAddressSpace
 
     }
 
-    pub fn patch_page(&mut self, params: &Params, access_type: whvp::MemoryAccessType, gva: u64, data: &mut [u8]) -> Result<(), TracerError> {
+    pub fn patch_page<H: trace::Hook>(&mut self, params: &Params, access_type: whvp::MemoryAccessType, gva: u64, data: &mut [u8], hook: &mut H) -> Result<(), TracerError> {
         if params.coverage_mode == CoverageMode::Hit && access_type == whvp::MemoryAccessType::Execute {
             // FIXME: add this to parameter
-            let gva_base = 0xfffff80480689000;
-            if gva_base <= gva && gva < gva_base + 0x1000 {
-                println!("ignoring gva range {:x}", gva_base);
-
-            } else {
+            // call hook patch page
+            if hook.patch_page(gva) {
                 data.copy_from_slice(&[0xcc; 4096]);
+
             }
+            // let gva_base = 0xfffff80480689000;
+            // if gva_base <= gva && gva < gva_base + 0x1000 {
+            //     println!("ignoring gva range {:x}", gva_base);
+
+            // } else {
+            // }
         } 
         else {
             let gva_base = params.return_address & !0xfff;
@@ -129,7 +133,7 @@ where S: Snapshot + mem::X64VirtualAddressSpace
  
     }
 
-    fn handle_memory_access_inner(&mut self, params: &Params, gpa: u64, gva: u64, access_type: whvp::MemoryAccessType, trace: &mut Trace) -> Result<bool, TracerError> {
+    fn handle_memory_access_inner<H: trace::Hook>(&mut self, params: &Params, gpa: u64, gva: u64, access_type: whvp::MemoryAccessType, trace: &mut Trace, hook: &mut H) -> Result<bool, TracerError> {
         match access_type {
             whvp::MemoryAccessType::Execute => {
                 trace.code += 1;
@@ -146,22 +150,22 @@ where S: Snapshot + mem::X64VirtualAddressSpace
         let cache = &mut self.cache;
         cache.add_page(base as u64, data);
  
-        self.patch_page(params, access_type, gva, &mut data)?;
+        self.patch_page(params, access_type, gva, &mut data, hook)?;
         self.map_page(gpa, &data)?;
 
         Ok(true)
     }
 
-    fn handle_memory_access(&mut self, params: &Params, memory_access_context: &whvp::MemoryAccessContext, trace: &mut Trace) -> Result<bool, TracerError> {
+    fn handle_memory_access<H: trace::Hook>(&mut self, params: &Params, memory_access_context: &whvp::MemoryAccessContext, trace: &mut Trace, hook: &mut H) -> Result<bool, TracerError> {
         let gpa = memory_access_context.Gpa;
         let gva = memory_access_context.Gva;
         let access_type = memory_access_context.AccessInfo.AccessType;
-        self.handle_memory_access_inner(params, gpa, gva, access_type, trace)?;
+        self.handle_memory_access_inner(params, gpa, gva, access_type, trace, hook)?;
 
         Ok(true)
     }
 
-    fn handle_exception(&mut self, params: &Params, vp_context: &whvp::VpContext, exception_context: &whvp::ExceptionContext, trace: &mut Trace) -> Result<bool, TracerError> {
+    fn handle_exception<H: trace::Hook>(&mut self, params: &Params, vp_context: &whvp::VpContext, exception_context: &whvp::ExceptionContext, trace: &mut Trace, hook: &mut H) -> Result<bool, TracerError> {
         let partition = &mut self.partition;
 
         if vp_context.ExecutionState.InterruptShadow {
@@ -241,7 +245,7 @@ where S: Snapshot + mem::X64VirtualAddressSpace
                         let paddr = self.snapshot.translate_gva(cr3, base)?;
                         if self.cache.pages.get(&paddr).is_none() { 
                             // println!("need to map {:x} {:x}, rip {:x}", base, paddr, rip);
-                            self.handle_memory_access_inner(params, paddr, base, whvp::MemoryAccessType::Execute, trace)?;
+                            self.handle_memory_access_inner(params, paddr, base, whvp::MemoryAccessType::Execute, trace, hook)?;
                         }
                     }
 
@@ -494,7 +498,7 @@ impl <'a, S: Snapshot + mem::X64VirtualAddressSpace> Tracer for WhvpTracer <'a, 
         Ok(())
     }
 
-    fn run<H: trace::Hook>(&mut self, params: &Params, _hook: &mut H) -> Result<Trace, TracerError> {
+    fn run<H: trace::Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace, TracerError> {
         let mut exits = 0;
         let mut cancel = 0;
 
@@ -538,7 +542,7 @@ impl <'a, S: Snapshot + mem::X64VirtualAddressSpace> Tracer for WhvpTracer <'a, 
             match exit_context {
                 whvp::ExitContext::MemoryAccess(_vp_context, memory_access_context) => {
                     cancel = 0;
-                    match self.handle_memory_access(&params, &memory_access_context, &mut trace) {
+                    match self.handle_memory_access(&params, &memory_access_context, &mut trace, hook) {
                         Ok(_) => (),
                         Err(e) => {
                             let msg = format!("{}", e);
@@ -549,7 +553,7 @@ impl <'a, S: Snapshot + mem::X64VirtualAddressSpace> Tracer for WhvpTracer <'a, 
                 }
                 whvp::ExitContext::Exception(vp_context, exception_context) => {
                     cancel = 0;
-                    match self.handle_exception(&params, &vp_context, &exception_context, &mut trace) {
+                    match self.handle_exception(&params, &vp_context, &exception_context, &mut trace, hook) {
                         Ok(false) => {
                             break;
                         },
@@ -761,7 +765,7 @@ mod test {
     }
 
     impl trace::Hook for TestHook {
-        fn setup<T: trace::Tracer>(&self, _tracer: &mut T) {
+        fn setup<T: trace::Tracer>(&mut self, _tracer: &mut T) {
 
         }
 
@@ -772,6 +776,11 @@ mod test {
         fn handle_trace(&self, _trace: &mut trace::Trace) -> Result<bool, trace::TracerError> {
             Ok(true)
         }
+
+        fn patch_page(&self, _: u64) -> bool {
+            todo!()
+        }
+    
     }
 
     #[derive(Default)]
