@@ -11,8 +11,10 @@ bitflags = "1.2.1"
 log = "0.4.8"
 zydis = "3.0"
 
-whvp-sys = { path = "../whvp-sys" }
 rewind-core = { path = "../rewind-core" }
+
+[target.'cfg(windows)'.dependencies]
+whvp-sys = { path = "../whvp-sys" }
 
 [dev-dependencies]
 pretty_assertions = "0.6.1"

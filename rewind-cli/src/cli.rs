@@ -23,6 +23,7 @@ use crate::helpers;
 pub enum Backend<'a, S>
 where S: snapshot::Snapshot {
 
+    #[cfg(windows)]
     Whvp(rewind_whvp::WhvpTracer<'a, S>),
     Bochs(rewind_bochs::BochsTracer<'a, S>)
 }
@@ -32,6 +33,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn get_state(&mut self) -> Result<trace::ProcessorState, TracerError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.get_state(),
             Self::Bochs(tracer) => tracer.get_state()
         }
@@ -39,6 +41,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn set_state(&mut self, state: &trace::ProcessorState) -> Result<(), TracerError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.set_state(state),
             Self::Bochs(tracer) => tracer.set_state(state)
         }
@@ -46,6 +49,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn run<H: trace::Hook>(&mut self, params: &trace::Params, hook: &mut H) -> Result<trace::Trace, TracerError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.run(params, hook),
             Self::Bochs(tracer) => tracer.run(params, hook)
         }
@@ -53,6 +57,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn restore_snapshot(&mut self) -> Result<usize, TracerError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.restore_snapshot(),
             Self::Bochs(tracer) => tracer.restore_snapshot()
         }
@@ -60,6 +65,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn read_gva(&mut self, cr3: u64, vaddr: u64, data: &mut [u8]) -> Result<(), TracerError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.read_gva(cr3, vaddr, data),
             Self::Bochs(tracer) => tracer.read_gva(cr3, vaddr, data)
         }
@@ -67,6 +73,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn write_gva(&mut self, cr3: u64, vaddr: u64, data: &[u8]) -> Result<(), TracerError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => Tracer::write_gva(tracer, cr3, vaddr, data),
             Self::Bochs(tracer) => Tracer::write_gva(tracer, cr3, vaddr, data)
         }
@@ -74,6 +81,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn cr3(&mut self) -> Result<u64, TracerError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.cr3(),
             Self::Bochs(tracer) => tracer.cr3()
         }
@@ -81,6 +89,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn singlestep<H: trace::Hook>(&mut self, params: &trace::Params, hook: &mut H) -> Result<trace::Trace, TracerError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.singlestep(params, hook),
             Self::Bochs(tracer) => tracer.singlestep(params, hook)
         }
@@ -88,6 +97,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn add_breakpoint(&mut self, address: u64) {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.add_breakpoint(address),
             Self::Bochs(tracer) => tracer.add_breakpoint(address)
         }
@@ -96,6 +106,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn get_mapped_pages(&self) -> Result<usize, TracerError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.get_mapped_pages(),
             Self::Bochs(tracer) => tracer.get_mapped_pages()
         }
@@ -107,6 +118,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn read_gpa(&self, gpa: u64, buf: &mut [u8]) -> Result<(), VirtMemError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.read_gpa(gpa, buf),
             Self::Bochs(tracer) => tracer.read_gpa(gpa, buf)
         }
@@ -114,6 +126,7 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
     fn write_gpa(&mut self, gpa: u64, data: &[u8]) -> Result<(), VirtMemError> {
         match self {
+            #[cfg(windows)]
             Self::Whvp(tracer) => tracer.write_gpa(gpa, data),
             Self::Bochs(tracer) => tracer.write_gpa(gpa, data)
         }
@@ -178,6 +191,7 @@ pub trait CliExt {
                 Backend::Bochs(rewind_bochs::BochsTracer::new(&snapshot))
 
             },
+            #[cfg(windows)]
             crate::BackendType::Whvp => {
                 Backend::Whvp(rewind_whvp::WhvpTracer::new(&snapshot)?)
             }
@@ -497,6 +511,7 @@ pub trait CliExt {
                 Backend::Bochs(rewind_bochs::BochsTracer::new(&snapshot))
 
             },
+            #[cfg(windows)]
             crate::BackendType::Whvp => {
                 Backend::Whvp(rewind_whvp::WhvpTracer::new(&snapshot)?)
             }

@@ -13,7 +13,6 @@ color-eyre = "0.5.10"
 
 rewind-core = { path = "../rewind-core" }
 rewind-bochs = { path = "../rewind-bochs" }
-rewind-whvp = { path = "../rewind-whvp" }
 rewind-snapshot = { path = "../rewind-snapshot" }
 rewind-system = { path = "../rewind-system" }
 rewind-tui = { path = "../rewind-tui" }
@@ -23,6 +22,9 @@ indicatif = "0.15.0"
 memmap = "0.7.0"
 flume = "0.10.0"
 chrono = "0.4.19"
+
+[target.'cfg(windows)'.dependencies]
+rewind-whvp = { path = "../rewind-whvp" }
 
 [[bin]]
 name = "rewind"

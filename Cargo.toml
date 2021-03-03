@@ -12,4 +12,5 @@ members = [
 
 exclude = [
     "vendor",
+    "whvp-sys",
 ]
