@@ -248,7 +248,9 @@ impl <S: Snapshot> hook::Hooks for BochsHooks <'_, S> {
         }
     }
 
-    // fn wrmsr(&mut self, _id: u32, _msr: u32, _val: u64) {}
+    fn wrmsr(&mut self, _cpu_id: u32, msr: u32, value: u64) {
+        println!("writing to msr {:x} {:x}", msr, value);
+    }
 
     // fn vmexit(&mut self, _id: u32, _reason: u32, _qualification: u64) {}
 
@@ -290,16 +292,17 @@ impl <'a, S: Snapshot> BochsHooks <'a, S> {
 
 }
 
-        
+/// Bochs based tracer        
 pub struct BochsTracer <'a, S: Snapshot> {
     hooks: BochsHooks<'a, S>,
-    pub breakpoints: BTreeSet<u64>,
+    breakpoints: BTreeSet<u64>,
     dirty: BTreeSet<u64>,
 
 }
 
 impl <'a, S: Snapshot> BochsTracer <'a, S> {
 
+    /// Instanciate a tracer over a snapshot
     pub fn new(snapshot: &'a S) -> Self {
 
         unsafe { Cpu::new(0) };
@@ -384,6 +387,8 @@ impl <'a, S: Snapshot> Tracer for BochsTracer <'a, S> {
             state.star = c.star();
             state.lstar = c.lstar();
             state.cstar = c.cstar();
+
+            state.apic_base = c.apic_base();
 
         }
 
@@ -498,6 +503,8 @@ impl <'a, S: Snapshot> Tracer for BochsTracer <'a, S> {
             c.set_lstar(context.lstar);
             c.set_cstar(context.cstar);
 
+            c.set_apic_base(context.apic_base);
+
             c.set_mode();
 
             // trace!("{:#x?}", c.state());
@@ -523,7 +530,6 @@ impl <'a, S: Snapshot> Tracer for BochsTracer <'a, S> {
             p.coverage_mode = params.coverage_mode.clone();
             p.excluded_addresses = params.excluded_addresses.clone();
             p.limit = params.limit;
-            p.save_instructions = params.save_instructions;
         }
 
         hook.setup(self);
@@ -726,10 +732,10 @@ mod test {
         let mut tracer = BochsTracer::new(&snapshot);
         let context = trace::ProcessorState::load(path.join("context.json")).unwrap();
         let mut params = trace::Params::default();
+        let mut hook = TestHook::default();
+
         params.return_address = snapshot.read_gva_u64(context.cr3, context.rsp).unwrap();
         params.save_context = true;
-
-        let mut hook = TestHook::default();
 
         tracer.set_state(&context).unwrap();
         let trace = tracer.run(&params, &mut hook).unwrap();

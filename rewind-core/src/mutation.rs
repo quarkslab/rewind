@@ -1,75 +1,34 @@
 
-use std::{collections::BTreeSet, fmt::Display, io::BufWriter, str::FromStr};
+//! Mutation
+
+use std::{collections::BTreeSet, convert::TryFrom, io::BufWriter};
 
 use std::io::Write;
 use std::convert::TryInto;
 
+use rand::prelude::*;
+
 use serde::{Serialize, Deserialize};
 
-use crate::{trace, fuzz::{Params, Strategy}, corpus::Corpus};
+use crate::{corpus::Corpus, error::GenericError, fuzz::{Params, Strategy}, trace};
 
-// #[derive(Debug, Default)]
-// pub struct RoundRobinBalancer<T: Ord> {
-//     pub items: BTreeSet<T>,
-//     index: Arc<RwLock<usize>>,
-// }
-
-// impl <T: Ord> RoundRobinBalancer<T> {
-
-//     pub fn insert(&mut self, item: T) {
-//         self.items.insert(item);
-//     }
-
-//     pub fn rotate(&mut self) -> Option<&T> {
-//         if self.items.is_empty() {
-//             return None
-//         }
-//         let item = self.index.try_write();
-//         let item = if let Ok(mut index) = item {
-//             *index = (*index + 1) % self.items.len();
-
-//             self.items.iter().nth(*index)
-//         } else { None };
-//         item
-//     }
-
-//     pub fn current(&self) -> Option<&T> {
-//         if self.items.is_empty() {
-//             return None
-//         }
-//         let item = self.index.try_write();
-//         let item = if let Ok(index) = item {
-//             self.items.iter().nth(*index)
-//         } else { None };
-//         item
-//     }
-// }
-
+/// Basic fuzzing strategy
 #[derive(Default)]
-pub struct BasicStrategy {
+pub struct BasicStrategy  {
+    /// Mutator used
     pub mutator: Mutator,
+    /// Coverage
     pub coverage: BTreeSet<u64>,
-    // balancer: RoundRobinBalancer<u64>,
-    range: Option<Range>,
 }
 
 impl BasicStrategy {
 
-    pub fn new(input_size: usize) -> Self {
-        let mutator = Mutator::new().input_size(input_size);
-
+    /// Constructor
+    pub fn new(mutator: Mutator) -> Self {
         Self {
             mutator,
             coverage: BTreeSet::new(),
-            // balancer: RoundRobinBalancer::default(),
-            range: None,
         }
-    }
-
-    pub fn range(&mut self, range: Range) {
-        let size = range.size();
-        self.range = Some(range);
-        self.mutator.input.resize(size, 0u8);
     }
 
 }
@@ -83,58 +42,19 @@ impl Strategy for BasicStrategy {
         // self.mutator.accessed = rules.offsets.iter().map(|o| *o as usize).collect();
         // self.mutator.immediate_values = rules.immediates.iter().map(|o| o.to_le_bytes().to_vec()).collect();
 
-        // need to sync corpus
-        // FIXME: impl round robin for corpus instead ?
-        // corpus.members.iter().for_each(|(name, _data)| {
-        //     self.balancer.insert(*name);
-        // });
-
-        // let to_remove: Vec<u64> = self.balancer.items.iter().filter(|&name| {
-        //     !corpus.members.contains_key(name)
-        // }).cloned().collect();
-
-        // to_remove.iter().for_each(|name| {
-        //     self.balancer.items.remove(name);
-        // });
-
-        let low = if let Some(range) = &self.range {
-            range.low
-        } else {
-            0
-        };
-
-        let high = if let Some(range) = &self.range {
-            range.high
-        } else {
-            self.mutator.input.len()
-        };
-
         if let Some((_hash, entry)) = corpus.rotate() {
-            // FIXME: use range 
-            // input size should be range size
-            // data should be rewritten with range
-            self.mutator.clear();
             let data_len = data.len();
             data[..].copy_from_slice(&entry.data[..data_len]);
-            self.mutator.input(&entry.data[low..high]);
-            self.mutator.mutate(4);
-            data[low..high].copy_from_slice(&self.mutator.input[..]);
+            self.mutator.mutate(data);
         } else {
-            self.mutator.mutate(4);
-            data[low..high].copy_from_slice(&self.mutator.input[..]);
+            self.mutator.mutate(data);
         }
     }
 
     // FIXME: use coverage to change corpus choice strategy ?
     fn check_new_coverage(&mut self, _params: &Params, trace: &mut trace::Trace) -> usize {
         let new = trace.seen.difference(&self.coverage).count();
-
-        if new > 0 {
-
-        } 
-
         self.coverage.append(&mut trace.seen);
-
         new
     }
 
@@ -144,357 +64,26 @@ impl Strategy for BasicStrategy {
 
 }
 
-#[derive(Debug, Clone)]
-pub struct Range {
-    low: usize,
-    high: usize,
-}
-
-impl Range {
-
-    pub fn new() -> Self {
-        Self {
-            low: 0,
-            high: 1
-        }
-    }
-
-    pub fn low(mut self, low: usize) -> Self {
-        self.low = low;
-        self
-    }
-
-    pub fn high(mut self, high: usize) -> Self {
-        self.high = high;
-        self
-    }
-
-    pub fn size(&self) -> usize {
-        self.high - self.low
-    }
-
-}
-
-impl Default for Range {
-
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FromStr for Range {
-
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parsed: Vec<u16> = s
-            // .trim_matches(|c| c == '[' || c == ']')
-            .split('-')
-            .filter_map(|n| n.trim().parse::<u16>().ok())
-            .collect();
-
-        if parsed.len() != 2 {
-            return Err("bad range")
-        }
-
-        let range = Self {
-            low: parsed[0] as usize,
-            high: parsed[1] as usize
-        };
-
-        Ok(range)
-    }
-}
-
-impl Display for Range {
-
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}-{}", self.low, self.high)
-    }
-}
-
-/// A basic random number generator based on xorshift64 with 64-bits of state
-struct Rng {
-    /// The RNG's seed and state
-    seed: u64,
-
-    /// If set, `rand_exp` behaves the same as `rand`
-    exp_disabled: bool,
-}
-
-impl Rng {
-    /// Generate a random number
-    #[inline]
-    fn next(&mut self) -> u64 {
-        let val = self.seed;
-        self.seed ^= self.seed << 13;
-        self.seed ^= self.seed >> 17;
-        self.seed ^= self.seed << 43;
-        val
-    }
-
-    /// Generates a random number with uniform distribution in the range of
-    /// [min, max]
-    #[inline]
-    fn rand(&mut self, min: usize, max: usize) -> usize {
-        // Make sure the range is sane
-        assert!(max >= min, "Bad range specified for rand()");
-
-        // If there is no range, just return `min`
-        if min == max {
-            return min;
-        }
-        
-        // If the range is unbounded, just return a random number
-        if min == 0 && max == core::usize::MAX {
-            return self.next() as usize;
-        }
-
-        // Pick a random number in the range
-        min + (self.next() as usize % (max - min + 1))
-    }
-    
-    /// Generates a random number with exponential distribution in the range of
-    /// [min, max] with a worst case deviation from uniform of 0.5x. Meaning
-    /// this will always return uniform at least half the time.
-    #[inline]
-    fn rand_exp(&mut self, min: usize, max: usize) -> usize {
-        // If exponential random is disabled, fall back to uniform
-        if self.exp_disabled {
-            return self.rand(min, max);
-        }
-
-        if self.rand(0, 1) == 0 {
-            // Half the time, provide uniform
-            self.rand(min, max)
-        } else {
-            // Pick an exponentially difficult random number
-            let x = self.rand(min, max);
-            self.rand(min, x)
-        }
-    }
-}
-
-
-pub struct Mutator {
-
-    pub input: Vec<u8>,
-    rng: Rng,
-    pub offsets: Vec<usize>,
-
-}
-
-impl Mutator {
-
-    pub fn new() -> Self {
-        Self {
-            input: Vec::new(),
-            rng: Rng {
-                seed:         0x12640367f4b7ea35,
-                exp_disabled: true,
-            },
-            offsets: Vec::new(),
-
-        }
-    }
-
-    /// Sets the seed for the internal RNG
-    pub fn seed(mut self, seed: u64) -> Self {
-        self.rng.seed = seed ^ 0x12640367f4b7ea35;
-        self
-    }
-
-    /// Sets the maximum input size
-    pub fn input_size(mut self, size: usize) -> Self {
-        self.input.resize(size, 0u8);
-        self
-    }
-
-    /// Sets the maximum input size
-    pub fn clear(&mut self) {
-        self.input.clear();
-    }
-
-    /// Sets the maximum input size
-    pub fn input(&mut self, input: &[u8]) {
-        self.input.extend(input);
-    }
-
-    /// Performs mutation of input
-    pub fn mutate(&mut self, mutations: usize) {
-        /// List of mutation strategies which do not require an input database
-        const STRATEGIES: &[fn(&mut Mutator)] = &[
-            Mutator::bit,
-            Mutator::inc_byte,
-            Mutator::dec_byte,
-            Mutator::neg_byte,
-            Mutator::add_sub,
-            Mutator::rand,
-            Mutator::magic,
-        ];
-
-        for _ in 0..mutations {
-            // Pick a random mutation strategy
-            let sel = self.rng.rand(0, STRATEGIES.len() - 1);
-                
-            // Get the strategy
-            let strategy = STRATEGIES[sel];
-            strategy(self);
-        }
-
-    }
-
-    fn rand_offset(&mut self) -> usize {
-        if !self.offsets.is_empty() {
-            let offset = self.offsets[self.rng.rand_exp(0, self.offsets.len() - 1)];
-            core::cmp::min(offset, self.input.len() - 1)
-        } else if !self.input.is_empty() {
-            self.rng.rand_exp(0, self.input.len() - 1)
-        } else {
-            0
-        }
-    }
-
-    /// Add or subtract a random amount with a random endianness from a random
-    /// size `u8` through `u64`
-    fn add_sub(&mut self) {
-        // Nothing to do on an empty input
-        if self.input.is_empty() {
-            return;
-        }
-
-        // Pick an offset to corrupt at
-        let offset = self.rand_offset();
-
-        let intsize = 1;
-
-        // Determine the maximum number to add or subtract
-        let range = 16;
-
-        // Convert the range to a random number from [-range, range]
-        let delta = self.rng.rand(0, range * 2) as i32 - range as i32;
-
-        let tmp = u8::from_ne_bytes(self.input[offset..offset + intsize].try_into().unwrap());
-
-        // Apply the delta, interpreting the bytes as a random
-        // endianness
-        let tmp = if self.rng.rand(0, 1) == 0 {
-            tmp.wrapping_add(delta as u8)
-        } else {
-            tmp.swap_bytes().wrapping_add(delta as u8).swap_bytes()
-        };
-
-        // Write the new value out to the input
-        self.input[offset..offset + intsize].copy_from_slice(&tmp.to_ne_bytes());
-
-    }
-    
-    /// Overwrite the bytes in the input with `buf` at `offset`. If `buf`
-    /// goes out of bounds of the input the `buf` will be truncated and the
-    /// copy will stop.
-    fn overwrite(&mut self, offset: usize, buf: &[u8]) {
-        // Get the slice that we may overwrite
-        let target = &mut self.input[offset..];
-
-        // Get the length to overwrite
-        let len = core::cmp::min(buf.len(), target.len());
-
-        // Overwrite the bytes
-        target[..len].copy_from_slice(&buf[..len]);
-        
-    }
-
-    fn rand(&mut self) {
-        // Nothing to do on an empty input
-        if self.input.is_empty() {
-            return;
-        }
-
-        let byte = self.rng.rand(0, 255) as u8;
-
-        // Pick a random offset and length
-        let offset = self.rand_offset();
-
-        self.input[offset] = byte;
-    }
-
-    /// Write over the input with a random magic value
-    fn magic(&mut self) {
-        // Nothing to do on an empty input
-        if self.input.is_empty() {
-            return;
-        }
-
-        // Pick a random offset
-        let offset = self.rand_offset();
-
-        let index = self.rng.rand(0, MAGIC_VALUES.len()- 1);
-        let magic_value = MAGIC_VALUES[index];
-        // Overwrite it
-        self.overwrite(offset, &magic_value);
-    }
-
-    fn bit(&mut self) {
-        if self.input.is_empty() {
-            return
-        }
-
-        let offset = self.rand_offset();
-        self.input[offset] ^= 1u8 << self.rng.rand(0, 7);
-    }
-
-    fn inc_byte(&mut self) {
-        if self.input.is_empty() {
-            return
-        }
-
-        let offset = self.rand_offset();
-        self.input[offset] = self.input[offset].wrapping_add(1);
-    }
-
-    fn dec_byte(&mut self) {
-        if self.input.is_empty() {
-            return
-        }
-
-        let offset = self.rand_offset();
-        self.input[offset] = self.input[offset].wrapping_sub(1);
-    }
-
-    fn neg_byte(&mut self) {
-        if self.input.is_empty() {
-            return
-        }
-
-        let offset = self.rand_offset();
-        self.input[offset] = !self.input[offset];
-    }
-
-}
-
-impl Default for Mutator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
+/// Hints to guide mutator
 #[derive(Serialize, Deserialize)]
 pub struct MutationHint {
+    /// Constant values found by disassembling instructions
     pub immediates: BTreeSet<u64>,
+    /// Accessed offsets from input
     pub offsets: BTreeSet<u64>,
-    pub ranges: BTreeSet<(usize, usize)>
 }
 
 impl MutationHint {
 
+    /// Constructor
     pub fn new() -> Self {
         Self {
             immediates: BTreeSet::new(),
             offsets: BTreeSet::new(),
-            ranges: BTreeSet::new()
         }
     }
 
+    /// Serialize to json and save to disk 
     pub fn save<P>(&self, path: P) -> Result<(), crate::error::GenericError>
     where P: AsRef<std::path::Path>
     {
@@ -504,6 +93,7 @@ impl MutationHint {
         Ok(())
     }
 
+    /// Load from disk and deserialize
     pub fn load<P>(path: P) -> Result<Self, crate::error::GenericError>
     where P: AsRef<std::path::Path>
     {
@@ -520,318 +110,1209 @@ impl Default for MutationHint {
     }
 }
 
-#[cfg(test)]
-mod test {
-    use crate::mutation::*;
+trait Field {
 
-    #[test]
-    fn test_simple() {
-        let mut mutator = Mutator::new().input_size(0x100);
-        mutator.mutate(1);
-    }
+    fn name(&self) -> &str;
 
-    #[test]
-    fn test_rand() {
-        let mut mutator = Mutator::new();
-        assert_eq!(mutator.rand_offset(), 0);
+    fn offset(&self) -> usize;
 
-        let mut mutator = Mutator::new().input_size(0x10);
-        assert_eq!(mutator.rand_offset(), 5);
-        assert_eq!(mutator.rand_offset(), 13);
-        assert_eq!(mutator.rand_offset(), 5);
-        assert_eq!(mutator.rand_offset(), 2);
-        assert_eq!(mutator.rand_offset(), 15);
-        assert_eq!(mutator.rand_offset(), 12);
+    fn mutate(&self, data: &mut [u8]);
 
-        let mut mutator = Mutator::new().input_size(0x10).seed(1);
-        assert_eq!(mutator.rand_offset(), 4);
-        assert_eq!(mutator.rand_offset(), 12);
-        assert_eq!(mutator.rand_offset(), 4);
-        assert_eq!(mutator.rand_offset(), 3);
-        assert_eq!(mutator.rand_offset(), 12);
-        assert_eq!(mutator.rand_offset(), 15);
+}
 
+// FIXME: for U8, U16, U32, U64 learn to use macro...
 
-        mutator.mutate(1);
-    }
+struct U8 {
+    name: String,
+    offset: usize,
+    constraints: Option<FieldConstraint>,
 
-    #[test]
-    fn test_offsets() {
-        let mut mutator = Mutator::new().input_size(0x10);
-        mutator.offsets.push(4);
+}
 
-        for  _ in 0..1000 {
-            assert_eq!(mutator.rand_offset(), 4);
+impl U8 {
+    fn new(name: String, offset: usize, constraints: Option<FieldConstraint>) -> Self {
+        Self {
+            name,
+            offset,
+            constraints
         }
-
     }
 
-    #[test]
-    fn test_mutate() {
-        let mut mutator = Mutator::new().input_size(0x10);
-        let input = mutator.input.clone();
+    fn add(&self, data: &mut [u8]) {
+        let value = data[self.offset];
 
-        mutator.mutate(1);
+        let range = 16;
 
-        assert_ne!(input, mutator.input);
+        let mut rng = thread_rng();
+        let delta = rng.gen_range(0..range);
 
+        let value = value.wrapping_add(delta);
+
+        data[self.offset] = value;
     }
 
-    #[test]
-    fn test_mutate2() {
-        let mut counter = 0;
-        let mut mutator = Mutator::new().input_size(0x60);
+    fn sub(&self, data: &mut [u8]) {
+        let value = data[self.offset];
 
-        loop {
-            counter += 1;
-            mutator.mutate(1);
+        let range = 16;
 
-            if mutator.input[0x30] == 0x38 {
-                break
+        let mut rng = thread_rng();
+        let delta = rng.gen_range(0..range);
+
+        let value = value.wrapping_sub(delta);
+
+        data[self.offset] = value;
+    }
+
+    fn rand(&self, data: &mut [u8]) {
+        let mut rng = thread_rng();
+        let value = if let Some(constraints) = self.constraints.as_ref() {
+            match (constraints.min, constraints.max) {
+                (None, None) => {
+                    rng.gen::<u8>()
+                }
+                (Some(min), None) => {
+                    rng.gen_range(min as u8..u8::MAX)
+                }
+                (None, Some(max)) => {
+                    rng.gen_range(u8::MIN..max as u8)
+                }
+                (Some(min), Some(max)) => {
+                    rng.gen_range(min..max) as u8
+                }
             }
+        } else {
+            rng.gen()
+        };
+ 
+        data[self.offset] = value;
+    }
+
+    fn magic(&self, data: &mut [u8]) {
+        let magic_values = [
+            b"\x00",
+            b"\x01",
+            b"\x02",
+            b"\x03",
+            b"\x04",
+            b"\x05",
+            b"\x06",
+            b"\x07",
+            b"\x08",
+            b"\x09",
+            b"\x0a",
+            b"\x0b",
+            b"\x0c",
+            b"\x0d",
+            b"\x0e",
+            b"\x0f",
+            b"\x10",
+            b"\x20",
+            b"\x40",
+            b"\x7e",
+            b"\x7f",
+            b"\x80",
+            b"\x81",
+            b"\xc0",
+            b"\xfe",
+            b"\xff",
+        ];
+        let mut rng = thread_rng();
+        if let Some(magic) = magic_values.choose(&mut rng) {
+            data[self.offset] = magic[0];
+        }
+    }
+}
+
+impl Field for U8 {
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    fn mutate(&self, data: &mut [u8]) {
+        if data.get(self.offset).is_none() {
+            return
         }
 
-        assert_eq!(mutator.input[0x30], 0x38);
-        assert_eq!(counter, 3641);
+        const STRATEGIES: &[fn(&U8, &mut [u8])] = &[
+            U8::add,
+            U8::sub,
+            U8::rand,
+            U8::magic,
+        ];
 
-        loop {
-            counter += 1;
-            mutator.mutate(1);
-
-            if mutator.input[0x10] == 0x80 {
-                break
+        if let Some(constraints) = self.constraints.as_ref() {
+            if let Some(value) = constraints.value {
+                data[self.offset] = value as u8;
+                return
             }
+
+            if let (Some(_min), Some(_max)) = (constraints.min, constraints.max) {
+                U8::rand(self, data);
+                return
+            }
+        } 
+        
+        let mut rng = thread_rng();
+        if let Some(strategy) = STRATEGIES.choose(&mut rng) {
+            strategy(self, data);
+            return
+        }
+    }
+}
+
+struct U16 {
+    name: String,
+    offset: usize,
+    constraints: Option<FieldConstraint>,
+
+}
+
+impl U16 {
+    fn new(name: String, offset: usize, constraints: Option<FieldConstraint>) -> Self {
+        Self {
+            name,
+            offset,
+            constraints
+        }
+    }
+
+    fn add(&self, data: &mut [u8]) {
+        let value = u16::from_le_bytes(data[self.offset..self.offset + 2].try_into().unwrap());
+
+        let range = 16;
+
+        let mut rng = thread_rng();
+        let delta = rng.gen_range(0..range);
+
+        let value = value.wrapping_add(delta);
+
+        data[self.offset..self.offset + 2].copy_from_slice(&value.to_le_bytes());
+
+    }
+
+    fn sub(&self, data: &mut [u8]) {
+        let value = u16::from_le_bytes(data[self.offset..self.offset + 2].try_into().unwrap());
+
+        let range = 16;
+
+        let mut rng = thread_rng();
+        let delta = rng.gen_range(0..range);
+
+        let value = value.wrapping_sub(delta);
+
+        data[self.offset..self.offset + 2].copy_from_slice(&value.to_le_bytes());
+
+    }
+
+    fn rand(&self, data: &mut [u8]) {
+        let mut rng = thread_rng();
+        let value = if let Some(constraints) = self.constraints.as_ref() {
+            match (constraints.min, constraints.max) {
+                (None, None) => {
+                    rng.gen::<u16>()
+                }
+                (Some(min), None) => {
+                    rng.gen_range(min as u16..u16::MAX)
+                }
+                (None, Some(max)) => {
+                    rng.gen_range(u16::MIN..max as u16)
+                }
+                (Some(min), Some(max)) => {
+                    rng.gen_range(min..max) as u16
+                }
+            }
+        } else {
+            rng.gen()
+        };
+ 
+        let bytes = u16::to_le_bytes(value);
+        data[self.offset..self.offset + 2].clone_from_slice(&bytes);
+    }
+
+    fn magic(&self, data: &mut [u8]) {
+        let magic_values = [
+            b"\x00\x00",
+            b"\x01\x01",
+            b"\x80\x80",
+            b"\xff\xff",
+            b"\x00\x01",
+            b"\x00\x02",
+            b"\x00\x03",
+            b"\x00\x04",
+            b"\x00\x05",
+            b"\x00\x06",
+            b"\x00\x07",
+            b"\x00\x08",
+            b"\x00\x09",
+            b"\x00\x0a",
+            b"\x00\x0b",
+            b"\x00\x0c",
+            b"\x00\x0d",
+            b"\x00\x0e",
+            b"\x00\x0f",
+            b"\x00\x10",
+            b"\x00\x20",
+            b"\x00\x40",
+            b"\x00\x7e",
+            b"\x00\x7f",
+            b"\x00\x80",
+            b"\x00\x81",
+            b"\x00\xc0",
+            b"\x00\xfe",
+            b"\x00\xff",
+            b"\x7e\xff",
+            b"\x7f\xff",
+            b"\x80\x00",
+            b"\x80\x01",
+            b"\xff\xfe",
+            b"\x00\x00",
+            b"\x01\x00",
+            b"\x02\x00",
+            b"\x03\x00",
+            b"\x04\x00",
+            b"\x05\x00",
+            b"\x06\x00",
+            b"\x07\x00",
+            b"\x08\x00",
+            b"\x09\x00",
+            b"\x0a\x00",
+            b"\x0b\x00",
+            b"\x0c\x00",
+            b"\x0d\x00",
+            b"\x0e\x00",
+            b"\x0f\x00",
+            b"\x10\x00",
+            b"\x20\x00",
+            b"\x40\x00",
+            b"\x7e\x00",
+            b"\x7f\x00",
+            b"\x80\x00",
+            b"\x81\x00",
+            b"\xc0\x00",
+            b"\xfe\x00",
+            b"\xff\x00",
+            b"\xff\x7e",
+            b"\xff\x7f",
+            b"\x00\x80",
+            b"\x01\x80",
+            b"\xfe\xff",
+        ];
+        let mut rng = thread_rng();
+        if let Some(magic) = magic_values.choose(&mut rng) {
+            data[self.offset..self.offset + 2].clone_from_slice(*magic);
+        }
+    }
+}
+
+impl Field for U16 {
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    fn mutate(&self, data: &mut [u8]) {
+        if data.get(self.offset..self.offset + 2).is_none() {
+            return
         }
 
-        assert_eq!(mutator.input[0x10], 0x80);
-        assert_eq!(counter, 7705);
+        const STRATEGIES: &[fn(&U16, &mut [u8])] = &[
+            U16::add,
+            U16::sub,
+            U16::rand,
+            U16::magic,
+        ];
 
+        if let Some(constraints) = self.constraints.as_ref() {
+            if let Some(value) = constraints.value {
+                let bytes = u16::to_le_bytes(value as u16);
+                data[self.offset..self.offset + 2].clone_from_slice(&bytes);
+                return
+            }
+
+            if let (Some(_min), Some(_max)) = (constraints.min, constraints.max) {
+                U16::rand(self, data);
+                return
+            }
+        } 
+        
+        let mut rng = thread_rng();
+        if let Some(strategy) = STRATEGIES.choose(&mut rng) {
+            strategy(self, data);
+            return
+        }
+        
+    }
+
+}
+
+struct U32 {
+    name: String,
+    offset: usize,
+    constraints: Option<FieldConstraint>,
+
+}
+
+impl U32 {
+    fn new(name: String, offset: usize, constraints: Option<FieldConstraint>) -> Self {
+        Self {
+            name,
+            offset,
+            constraints
+        }
+    }
+
+    fn add(&self, data: &mut [u8]) {
+        let value = u32::from_le_bytes(data[self.offset..self.offset + 4].try_into().unwrap());
+
+        let range = 16;
+
+        let mut rng = thread_rng();
+        let delta = rng.gen_range(0..range);
+
+        let value = value.wrapping_add(delta);
+
+        data[self.offset..self.offset + 4].copy_from_slice(&value.to_le_bytes());
+
+    }
+
+    fn sub(&self, data: &mut [u8]) {
+        let value = u32::from_le_bytes(data[self.offset..self.offset + 4].try_into().unwrap());
+
+        let range = 16;
+
+        let mut rng = thread_rng();
+        let delta = rng.gen_range(0..range);
+
+        let value = value.wrapping_sub(delta);
+
+        data[self.offset..self.offset + 4].copy_from_slice(&value.to_le_bytes());
+
+    }
+
+    fn rand(&self, data: &mut [u8]) {
+        let mut rng = thread_rng();
+        let value = if let Some(constraints) = self.constraints.as_ref() {
+            match (constraints.min, constraints.max) {
+                (None, None) => {
+                    rng.gen::<u32>()
+                }
+                (Some(min), None) => {
+                    rng.gen_range(min as u32..u32::MAX)
+                }
+                (None, Some(max)) => {
+                    rng.gen_range(u32::MIN..max as u32)
+                }
+                (Some(min), Some(max)) => {
+                    rng.gen_range(min..max) as u32
+                }
+            }
+        } else {
+            rng.gen()
+        };
+ 
+        let bytes = u32::to_le_bytes(value);
+        data[self.offset..self.offset + 4].clone_from_slice(&bytes);
+    }
+
+    fn magic(&self, data: &mut [u8]) {
+        let magic_values = [
+            b"\x00\x00\x00\x00",
+            b"\x01\x01\x01\x01",
+            b"\x80\x80\x80\x80",
+            b"\xff\xff\xff\xff",
+            b"\x00\x00\x00\x01",
+            b"\x00\x00\x00\x02",
+            b"\x00\x00\x00\x03",
+            b"\x00\x00\x00\x04",
+            b"\x00\x00\x00\x05",
+            b"\x00\x00\x00\x06",
+            b"\x00\x00\x00\x07",
+            b"\x00\x00\x00\x08",
+            b"\x00\x00\x00\x09",
+            b"\x00\x00\x00\x0a",
+            b"\x00\x00\x00\x0b",
+            b"\x00\x00\x00\x0c",
+            b"\x00\x00\x00\x0d",
+            b"\x00\x00\x00\x0e",
+            b"\x00\x00\x00\x0f",
+            b"\x00\x00\x00\x10",
+            b"\x00\x00\x00\x20",
+            b"\x00\x00\x00\x40",
+            b"\x00\x00\x00\x7e",
+            b"\x00\x00\x00\x7f",
+            b"\x00\x00\x00\x80",
+            b"\x00\x00\x00\x81",
+            b"\x00\x00\x00\xc0",
+            b"\x00\x00\x00\xfe",
+            b"\x00\x00\x00\xff",
+            b"\x7e\xff\xff\xff",
+            b"\x7f\xff\xff\xff",
+            b"\x80\x00\x00\x00",
+            b"\x80\x00\x00\x01",
+            b"\xff\xff\xff\xfe",
+            b"\x00\x00\x00\x00",
+            b"\x01\x00\x00\x00",
+            b"\x02\x00\x00\x00",
+            b"\x03\x00\x00\x00",
+            b"\x04\x00\x00\x00",
+            b"\x05\x00\x00\x00",
+            b"\x06\x00\x00\x00",
+            b"\x07\x00\x00\x00",
+            b"\x08\x00\x00\x00",
+            b"\x09\x00\x00\x00",
+            b"\x0a\x00\x00\x00",
+            b"\x0b\x00\x00\x00",
+            b"\x0c\x00\x00\x00",
+            b"\x0d\x00\x00\x00",
+            b"\x0e\x00\x00\x00",
+            b"\x0f\x00\x00\x00",
+            b"\x10\x00\x00\x00",
+            b"\x20\x00\x00\x00",
+            b"\x40\x00\x00\x00",
+            b"\x7e\x00\x00\x00",
+            b"\x7f\x00\x00\x00",
+            b"\x80\x00\x00\x00",
+            b"\x81\x00\x00\x00",
+            b"\xc0\x00\x00\x00",
+            b"\xfe\x00\x00\x00",
+            b"\xff\x00\x00\x00",
+            b"\xff\xff\xff\x7e",
+            b"\xff\xff\xff\x7f",
+            b"\x00\x00\x00\x80",
+            b"\x01\x00\x00\x80",
+            b"\xfe\xff\xff\xff",
+        ];
+        let mut rng = thread_rng();
+        if let Some(magic) = magic_values.choose(&mut rng) {
+            data[self.offset..self.offset + 4].clone_from_slice(*magic);
+        }
+    }
+}
+
+impl Field for U32 {
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    fn mutate(&self, data: &mut [u8]) {
+        if data.get(self.offset..self.offset + 4).is_none() {
+            return
+        }
+
+        const STRATEGIES: &[fn(&U32, &mut [u8])] = &[
+            U32::add,
+            U32::sub,
+            U32::rand,
+            U32::magic,
+        ];
+
+        if let Some(constraints) = self.constraints.as_ref() {
+            if let Some(value) = constraints.value {
+                let bytes = u32::to_le_bytes(value as u32);
+                data[self.offset..self.offset + 4].clone_from_slice(&bytes);
+                return
+            }
+
+            if let (Some(_min), Some(_max)) = (constraints.min, constraints.max) {
+                U32::rand(self, data);
+                return
+            }
+        } 
+        
+        let mut rng = thread_rng();
+        if let Some(strategy) = STRATEGIES.choose(&mut rng) {
+            strategy(self, data);
+            return
+        }
+        
+    }
+
+}
+
+struct U64  {
+    name: String,
+    offset: usize,
+    constraints: Option<FieldConstraint>,
+}
+
+impl U64 {
+    fn new(name: String, offset: usize, constraints: Option<FieldConstraint>) -> Self {
+        Self {
+            name,
+            offset,
+            constraints
+        }
+    }
+
+    fn add(&self, data: &mut [u8]) {
+        let value = u64::from_le_bytes(data[self.offset..self.offset + 8].try_into().unwrap());
+
+        let range = 16;
+
+        let mut rng = thread_rng();
+        let delta = rng.gen_range(0..range);
+
+        let value = value.wrapping_add(delta);
+
+        data[self.offset..self.offset + 8].copy_from_slice(&value.to_le_bytes());
+
+    }
+
+    fn sub(&self, data: &mut [u8]) {
+        let value = u64::from_le_bytes(data[self.offset..self.offset + 8].try_into().unwrap());
+
+        let range = 16;
+
+        let mut rng = thread_rng();
+        let delta = rng.gen_range(0..range);
+
+        let value = value.wrapping_sub(delta);
+
+        data[self.offset..self.offset + 8].copy_from_slice(&value.to_le_bytes());
+
+    }
+
+    fn rand(&self, data: &mut [u8]) {
+        let mut rng = thread_rng();
+        let value = if let Some(constraints) = self.constraints.as_ref() {
+            match (constraints.min, constraints.max) {
+                (None, None) => {
+                    rng.gen::<u64>()
+                }
+                (Some(min), None) => {
+                    rng.gen_range(min as u64..u64::MAX)
+                }
+                (None, Some(max)) => {
+                    rng.gen_range(u64::MIN..max as u64)
+                }
+                (Some(min), Some(max)) => {
+                    rng.gen_range(min..max) as u64
+                }
+            }
+        } else {
+            rng.gen()
+        };
+ 
+        let bytes = u64::to_le_bytes(value);
+        data[self.offset..self.offset + 8].clone_from_slice(&bytes);
+    }
+
+    fn magic(&self, data: &mut [u8]) {
+        let magic_values = [
+            b"\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x01\x01\x01\x01\x01\x01\x01\x01",
+            b"\x80\x80\x80\x80\x80\x80\x80\x80",
+            b"\xff\xff\xff\xff\xff\xff\xff\xff",
+            b"\x00\x00\x00\x00\x00\x00\x00\x01",
+            b"\x00\x00\x00\x00\x00\x00\x00\x02",
+            b"\x00\x00\x00\x00\x00\x00\x00\x03",
+            b"\x00\x00\x00\x00\x00\x00\x00\x04",
+            b"\x00\x00\x00\x00\x00\x00\x00\x05",
+            b"\x00\x00\x00\x00\x00\x00\x00\x06",
+            b"\x00\x00\x00\x00\x00\x00\x00\x07",
+            b"\x00\x00\x00\x00\x00\x00\x00\x08",
+            b"\x00\x00\x00\x00\x00\x00\x00\x09",
+            b"\x00\x00\x00\x00\x00\x00\x00\x0a",
+            b"\x00\x00\x00\x00\x00\x00\x00\x0b",
+            b"\x00\x00\x00\x00\x00\x00\x00\x0c",
+            b"\x00\x00\x00\x00\x00\x00\x00\x0d",
+            b"\x00\x00\x00\x00\x00\x00\x00\x0e",
+            b"\x00\x00\x00\x00\x00\x00\x00\x0f",
+            b"\x00\x00\x00\x00\x00\x00\x00\x10",
+            b"\x00\x00\x00\x00\x00\x00\x00\x20",
+            b"\x00\x00\x00\x00\x00\x00\x00\x40",
+            b"\x00\x00\x00\x00\x00\x00\x00\x7e",
+            b"\x00\x00\x00\x00\x00\x00\x00\x7f",
+            b"\x00\x00\x00\x00\x00\x00\x00\x80",
+            b"\x00\x00\x00\x00\x00\x00\x00\x81",
+            b"\x00\x00\x00\x00\x00\x00\x00\xc0",
+            b"\x00\x00\x00\x00\x00\x00\x00\xfe",
+            b"\x00\x00\x00\x00\x00\x00\x00\xff",
+            b"\x7e\xff\xff\xff\xff\xff\xff\xff",
+            b"\x7f\xff\xff\xff\xff\xff\xff\xff",
+            b"\x80\x00\x00\x00\x00\x00\x00\x00",
+            b"\x80\x00\x00\x00\x00\x00\x00\x01",
+            b"\xff\xff\xff\xff\xff\xff\xff\xfe",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x01\x00\x00\x00\x00\x00\x00\x00",
+            b"\x02\x00\x00\x00\x00\x00\x00\x00",
+            b"\x03\x00\x00\x00\x00\x00\x00\x00",
+            b"\x04\x00\x00\x00\x00\x00\x00\x00",
+            b"\x05\x00\x00\x00\x00\x00\x00\x00",
+            b"\x06\x00\x00\x00\x00\x00\x00\x00",
+            b"\x07\x00\x00\x00\x00\x00\x00\x00",
+            b"\x08\x00\x00\x00\x00\x00\x00\x00",
+            b"\x09\x00\x00\x00\x00\x00\x00\x00",
+            b"\x0a\x00\x00\x00\x00\x00\x00\x00",
+            b"\x0b\x00\x00\x00\x00\x00\x00\x00",
+            b"\x0c\x00\x00\x00\x00\x00\x00\x00",
+            b"\x0d\x00\x00\x00\x00\x00\x00\x00",
+            b"\x0e\x00\x00\x00\x00\x00\x00\x00",
+            b"\x0f\x00\x00\x00\x00\x00\x00\x00",
+            b"\x10\x00\x00\x00\x00\x00\x00\x00",
+            b"\x20\x00\x00\x00\x00\x00\x00\x00",
+            b"\x40\x00\x00\x00\x00\x00\x00\x00",
+            b"\x7e\x00\x00\x00\x00\x00\x00\x00",
+            b"\x7f\x00\x00\x00\x00\x00\x00\x00",
+            b"\x80\x00\x00\x00\x00\x00\x00\x00",
+            b"\x81\x00\x00\x00\x00\x00\x00\x00",
+            b"\xc0\x00\x00\x00\x00\x00\x00\x00",
+            b"\xfe\x00\x00\x00\x00\x00\x00\x00",
+            b"\xff\x00\x00\x00\x00\x00\x00\x00",
+            b"\xff\xff\xff\xff\xff\xff\xff\x7e",
+            b"\xff\xff\xff\xff\xff\xff\xff\x7f",
+            b"\x00\x00\x00\x00\x00\x00\x00\x80",
+            b"\x01\x00\x00\x00\x00\x00\x00\x80",
+            b"\xfe\xff\xff\xff\xff\xff\xff\xff",
+        ];
+        let mut rng = thread_rng();
+        if let Some(magic) = magic_values.choose(&mut rng) {
+            data[self.offset..self.offset + 8].clone_from_slice(*magic);
+        }
+    }
+}
+
+impl Field for U64 {
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    fn mutate(&self, data: &mut [u8]) {
+        if data.get(self.offset..self.offset + 8).is_none() {
+            return
+        }
+
+        const STRATEGIES: &[fn(&U64, &mut [u8])] = &[
+            U64::add,
+            U64::sub,
+            U64::rand,
+            U64::magic,
+        ];
+
+        if let Some(constraints) = self.constraints.as_ref() {
+            if let Some(value) = constraints.value {
+                let bytes = u64::to_le_bytes(value as u64);
+                data[self.offset..self.offset + 8].clone_from_slice(&bytes);
+                return
+            }
+
+            if let (Some(_min), Some(_max)) = (constraints.min, constraints.max) {
+                U64::rand(self, data);
+                return
+            }
+        } 
+        
+        let mut rng = thread_rng();
+        if let Some(strategy) = STRATEGIES.choose(&mut rng) {
+            strategy(self, data);
+            return
+        }
+ 
+    }
+
+}
+
+struct PWStr {
+    name: String,
+    offset: usize,
+    value: u64,
+    size: usize,
+
+}
+
+impl PWStr {
+    fn new(name: String, offset: usize, value: u64, size: usize) -> Self {
+        Self {
+            name,
+            offset,
+            value,
+            size,
+        }
+    }
+}
+
+impl Field for PWStr {
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    // FIXME: read orig as wstr
+    // mutate some char
+    // write mutated
+    // same as u64, need several strategies
+    fn mutate(&self, data: &mut [u8]) {
+        if data.get(self.offset..self.offset + 8).is_none() {
+            return
+        }
+
+        let bytes = u64::to_le_bytes(self.value);
+        data[self.offset..self.offset+8].clone_from_slice(&bytes);
+
+        let start = self.value as usize;
+
+        if data.get(start).is_none() {
+            return
+        }
+
+        let end = self.value as usize + 2 * (self.size + 1);
+
+        if data.get(end).is_none() {
+            return
+        }
+
+        use rand::distributions::Alphanumeric;
+        let rand_string: String = thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(self.size)
+            .map(char::from)
+            .collect();
+
+        use std::os::windows::ffi::OsStrExt;
+        use std::ffi::OsStr;
+        let text = OsStr::new(&rand_string).encode_wide().chain(Some(0).into_iter()).collect::<Vec<_>>();
+        for (o, &b) in text.iter().enumerate() {
+            let offset = self.value as usize + o * 2;
+            let bytes = u16::to_le_bytes(b);
+            data[offset..offset + 2].clone_from_slice(&bytes);
+        }
+    }
+
+}
+struct Data {
+    name: String,
+    offset: usize,
+    size: usize,
+}
+
+impl Data {
+    fn new(name: String, offset: usize, size: usize) -> Self {
+        Self {
+            name,
+            offset,
+            size,
+        }
+    }
+
+    fn rand_offset(&self) -> usize {
+        let mut rng = thread_rng();
+        rng.gen_range(self.offset..self.offset + self.size)
+    }
+
+
+    fn rand(&self, data: &mut [u8]) {
+        let mut rng = thread_rng();
+        let value = rng.gen::<u8>();
+        let offset = self.rand_offset();
+
+        data[offset] = value;
+    }
+
+    fn bit(&self, data: &mut [u8]) {
+        let mut rng = thread_rng();
+        let offset = self.rand_offset();
+        data[offset] ^= 1u8 << rng.gen_range(0..7);
+    }
+
+    fn inc_byte(&self, data: &mut [u8]) {
+        let offset = self.rand_offset();
+        data[offset] = data[offset].wrapping_add(1);
+    }
+
+    fn dec_byte(&self, data: &mut [u8]) {
+        let offset = self.rand_offset();
+        data[offset] = data[offset].wrapping_sub(1);
+    }
+
+    fn neg_byte(&self, data: &mut [u8]) {
+        let offset = self.rand_offset();
+        data[offset] = !data[offset];
+    }
+}
+
+impl Field for Data {
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    fn mutate(&self, data: &mut [u8]) {
+        if data.get(self.offset..self.offset + self.size).is_none() {
+            return
+        }
+
+        const STRATEGIES: &[fn(&Data, &mut [u8])] = &[
+            Data::rand,
+            Data::bit,
+            Data::inc_byte,
+            Data::dec_byte,
+            Data::neg_byte,
+        ];
+
+        let mut rng = thread_rng();
+        if let Some(strategy) = STRATEGIES.choose(&mut rng) {
+            strategy(self, data);
+            return
+        }
+    }
+
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+enum FieldType {
+    U8,
+    U16,
+    U32,
+    U64,
+    PWSTR,
+    DATA,
+
+}
+
+impl Default for FieldType {
+
+    fn default() -> Self { 
+        Self::U8
+    }
+
+}
+
+#[derive(Clone, Default, Debug, Deserialize, Serialize)]
+struct FieldConstraint {
+    min: Option<usize>,
+    max: Option<usize>,
+    value: Option<usize>,
+    size: Option<usize>,
+
+}
+
+/// Basic mutator
+#[derive(Default)]
+pub struct Mutator {
+    fields: Vec<Box<dyn Field>>,
+
+}
+
+impl Mutator {
+
+    fn add_field<F: Field + 'static>(&mut self, field: F) {
+        self.fields.push(Box::new(field));
+    }
+
+    // FIXME: probability to fuzz a field
+    // FIXME: how many fields to mutate
+    /// Choose a random number of fields and mutate them 
+    pub fn mutate(&mut self, data: &mut [u8]) {
+        if self.fields.is_empty() {
+            return
+        }
+
+        let mut rng = thread_rng();
+
+        let fields_to_mutate = rng.gen_range(1..self.fields.len());
+        let fields = self.fields.choose_multiple(&mut rng, fields_to_mutate);
+        for f in fields {
+            f.mutate(data);
+        }
 
     }
 }
 
-pub const MAGIC_VALUES: &[&[u8]] = &[
-    b"\x00",
-    b"\x01",
-    b"\x02",
-    b"\x03",
-    b"\x04",
-    b"\x05",
-    b"\x06",
-    b"\x07",
-    b"\x08",
-    b"\x09",
-    b"\x0a",
-    b"\x0b",
-    b"\x0c",
-    b"\x0d",
-    b"\x0e",
-    b"\x0f",
-    b"\x10",
-    b"\x20",
-    b"\x40",
-    b"\x7e",
-    b"\x7f",
-    b"\x80",
-    b"\x81",
-    b"\xc0",
-    b"\xfe",
-    b"\xff",
-    b"\x00\x00",
-    b"\x01\x01",
-    b"\x80\x80",
-    b"\xff\xff",
-    b"\x00\x01",
-    b"\x00\x02",
-    b"\x00\x03",
-    b"\x00\x04",
-    b"\x00\x05",
-    b"\x00\x06",
-    b"\x00\x07",
-    b"\x00\x08",
-    b"\x00\x09",
-    b"\x00\x0a",
-    b"\x00\x0b",
-    b"\x00\x0c",
-    b"\x00\x0d",
-    b"\x00\x0e",
-    b"\x00\x0f",
-    b"\x00\x10",
-    b"\x00\x20",
-    b"\x00\x40",
-    b"\x00\x7e",
-    b"\x00\x7f",
-    b"\x00\x80",
-    b"\x00\x81",
-    b"\x00\xc0",
-    b"\x00\xfe",
-    b"\x00\xff",
-    b"\x7e\xff",
-    b"\x7f\xff",
-    b"\x80\x00",
-    b"\x80\x01",
-    b"\xff\xfe",
-    b"\x00\x00",
-    b"\x01\x00",
-    b"\x02\x00",
-    b"\x03\x00",
-    b"\x04\x00",
-    b"\x05\x00",
-    b"\x06\x00",
-    b"\x07\x00",
-    b"\x08\x00",
-    b"\x09\x00",
-    b"\x0a\x00",
-    b"\x0b\x00",
-    b"\x0c\x00",
-    b"\x0d\x00",
-    b"\x0e\x00",
-    b"\x0f\x00",
-    b"\x10\x00",
-    b"\x20\x00",
-    b"\x40\x00",
-    b"\x7e\x00",
-    b"\x7f\x00",
-    b"\x80\x00",
-    b"\x81\x00",
-    b"\xc0\x00",
-    b"\xfe\x00",
-    b"\xff\x00",
-    b"\xff\x7e",
-    b"\xff\x7f",
-    b"\x00\x80",
-    b"\x01\x80",
-    b"\xfe\xff",
-    b"\x00\x00\x00\x00",
-    b"\x01\x01\x01\x01",
-    b"\x80\x80\x80\x80",
-    b"\xff\xff\xff\xff",
-    b"\x00\x00\x00\x01",
-    b"\x00\x00\x00\x02",
-    b"\x00\x00\x00\x03",
-    b"\x00\x00\x00\x04",
-    b"\x00\x00\x00\x05",
-    b"\x00\x00\x00\x06",
-    b"\x00\x00\x00\x07",
-    b"\x00\x00\x00\x08",
-    b"\x00\x00\x00\x09",
-    b"\x00\x00\x00\x0a",
-    b"\x00\x00\x00\x0b",
-    b"\x00\x00\x00\x0c",
-    b"\x00\x00\x00\x0d",
-    b"\x00\x00\x00\x0e",
-    b"\x00\x00\x00\x0f",
-    b"\x00\x00\x00\x10",
-    b"\x00\x00\x00\x20",
-    b"\x00\x00\x00\x40",
-    b"\x00\x00\x00\x7e",
-    b"\x00\x00\x00\x7f",
-    b"\x00\x00\x00\x80",
-    b"\x00\x00\x00\x81",
-    b"\x00\x00\x00\xc0",
-    b"\x00\x00\x00\xfe",
-    b"\x00\x00\x00\xff",
-    b"\x7e\xff\xff\xff",
-    b"\x7f\xff\xff\xff",
-    b"\x80\x00\x00\x00",
-    b"\x80\x00\x00\x01",
-    b"\xff\xff\xff\xfe",
-    b"\x00\x00\x00\x00",
-    b"\x01\x00\x00\x00",
-    b"\x02\x00\x00\x00",
-    b"\x03\x00\x00\x00",
-    b"\x04\x00\x00\x00",
-    b"\x05\x00\x00\x00",
-    b"\x06\x00\x00\x00",
-    b"\x07\x00\x00\x00",
-    b"\x08\x00\x00\x00",
-    b"\x09\x00\x00\x00",
-    b"\x0a\x00\x00\x00",
-    b"\x0b\x00\x00\x00",
-    b"\x0c\x00\x00\x00",
-    b"\x0d\x00\x00\x00",
-    b"\x0e\x00\x00\x00",
-    b"\x0f\x00\x00\x00",
-    b"\x10\x00\x00\x00",
-    b"\x20\x00\x00\x00",
-    b"\x40\x00\x00\x00",
-    b"\x7e\x00\x00\x00",
-    b"\x7f\x00\x00\x00",
-    b"\x80\x00\x00\x00",
-    b"\x81\x00\x00\x00",
-    b"\xc0\x00\x00\x00",
-    b"\xfe\x00\x00\x00",
-    b"\xff\x00\x00\x00",
-    b"\xff\xff\xff\x7e",
-    b"\xff\xff\xff\x7f",
-    b"\x00\x00\x00\x80",
-    b"\x01\x00\x00\x80",
-    b"\xfe\xff\xff\xff",
-    b"\x00\x00\x00\x00\x00\x00\x00\x00",
-    b"\x01\x01\x01\x01\x01\x01\x01\x01",
-    b"\x80\x80\x80\x80\x80\x80\x80\x80",
-    b"\xff\xff\xff\xff\xff\xff\xff\xff",
-    b"\x00\x00\x00\x00\x00\x00\x00\x01",
-    b"\x00\x00\x00\x00\x00\x00\x00\x02",
-    b"\x00\x00\x00\x00\x00\x00\x00\x03",
-    b"\x00\x00\x00\x00\x00\x00\x00\x04",
-    b"\x00\x00\x00\x00\x00\x00\x00\x05",
-    b"\x00\x00\x00\x00\x00\x00\x00\x06",
-    b"\x00\x00\x00\x00\x00\x00\x00\x07",
-    b"\x00\x00\x00\x00\x00\x00\x00\x08",
-    b"\x00\x00\x00\x00\x00\x00\x00\x09",
-    b"\x00\x00\x00\x00\x00\x00\x00\x0a",
-    b"\x00\x00\x00\x00\x00\x00\x00\x0b",
-    b"\x00\x00\x00\x00\x00\x00\x00\x0c",
-    b"\x00\x00\x00\x00\x00\x00\x00\x0d",
-    b"\x00\x00\x00\x00\x00\x00\x00\x0e",
-    b"\x00\x00\x00\x00\x00\x00\x00\x0f",
-    b"\x00\x00\x00\x00\x00\x00\x00\x10",
-    b"\x00\x00\x00\x00\x00\x00\x00\x20",
-    b"\x00\x00\x00\x00\x00\x00\x00\x40",
-    b"\x00\x00\x00\x00\x00\x00\x00\x7e",
-    b"\x00\x00\x00\x00\x00\x00\x00\x7f",
-    b"\x00\x00\x00\x00\x00\x00\x00\x80",
-    b"\x00\x00\x00\x00\x00\x00\x00\x81",
-    b"\x00\x00\x00\x00\x00\x00\x00\xc0",
-    b"\x00\x00\x00\x00\x00\x00\x00\xfe",
-    b"\x00\x00\x00\x00\x00\x00\x00\xff",
-    b"\x7e\xff\xff\xff\xff\xff\xff\xff",
-    b"\x7f\xff\xff\xff\xff\xff\xff\xff",
-    b"\x80\x00\x00\x00\x00\x00\x00\x00",
-    b"\x80\x00\x00\x00\x00\x00\x00\x01",
-    b"\xff\xff\xff\xff\xff\xff\xff\xfe",
-    b"\x00\x00\x00\x00\x00\x00\x00\x00",
-    b"\x01\x00\x00\x00\x00\x00\x00\x00",
-    b"\x02\x00\x00\x00\x00\x00\x00\x00",
-    b"\x03\x00\x00\x00\x00\x00\x00\x00",
-    b"\x04\x00\x00\x00\x00\x00\x00\x00",
-    b"\x05\x00\x00\x00\x00\x00\x00\x00",
-    b"\x06\x00\x00\x00\x00\x00\x00\x00",
-    b"\x07\x00\x00\x00\x00\x00\x00\x00",
-    b"\x08\x00\x00\x00\x00\x00\x00\x00",
-    b"\x09\x00\x00\x00\x00\x00\x00\x00",
-    b"\x0a\x00\x00\x00\x00\x00\x00\x00",
-    b"\x0b\x00\x00\x00\x00\x00\x00\x00",
-    b"\x0c\x00\x00\x00\x00\x00\x00\x00",
-    b"\x0d\x00\x00\x00\x00\x00\x00\x00",
-    b"\x0e\x00\x00\x00\x00\x00\x00\x00",
-    b"\x0f\x00\x00\x00\x00\x00\x00\x00",
-    b"\x10\x00\x00\x00\x00\x00\x00\x00",
-    b"\x20\x00\x00\x00\x00\x00\x00\x00",
-    b"\x40\x00\x00\x00\x00\x00\x00\x00",
-    b"\x7e\x00\x00\x00\x00\x00\x00\x00",
-    b"\x7f\x00\x00\x00\x00\x00\x00\x00",
-    b"\x80\x00\x00\x00\x00\x00\x00\x00",
-    b"\x81\x00\x00\x00\x00\x00\x00\x00",
-    b"\xc0\x00\x00\x00\x00\x00\x00\x00",
-    b"\xfe\x00\x00\x00\x00\x00\x00\x00",
-    b"\xff\x00\x00\x00\x00\x00\x00\x00",
-    b"\xff\xff\xff\xff\xff\xff\xff\x7e",
-    b"\xff\xff\xff\xff\xff\xff\xff\x7f",
-    b"\x00\x00\x00\x00\x00\x00\x00\x80",
-    b"\x01\x00\x00\x00\x00\x00\x00\x80",
-    b"\xfe\xff\xff\xff\xff\xff\xff\xff",
-];
+#[derive(Default, Debug, Deserialize, Serialize)]
+struct FieldDesc {
+    name: String,
+    offset: usize,
+    r#type: FieldType,
+    constraints: Option<FieldConstraint>,
+    ratio: Option<f64>,
+}
 
+/// Describe input layout
+#[derive(Default, Debug, Deserialize, Serialize)]
+pub struct StructDesc {
+    fields: Vec<FieldDesc>,
+
+}
+
+impl StructDesc {
+
+    /// Serialize to json and save to disk
+    pub fn save<P>(&self, path: P) -> Result<(), crate::error::GenericError>
+    where P: AsRef<std::path::Path>
+    {
+        let mut fp = BufWriter::new(std::fs::File::create(&path)?);
+        let data = serde_yaml::to_vec(&self)?;
+        fp.write_all(&data)?;
+        Ok(())
+    }
+
+    /// Load from disk and deserialize
+    pub fn load<P>(path: P) -> Result<Self, crate::error::GenericError>
+    where P: AsRef<std::path::Path>
+    {
+        let input_str = std::fs::read_to_string(&path)?;
+        let input = serde_yaml::from_str(&input_str)?;
+        Ok(input)
+    }
+
+}
+
+impl TryFrom<StructDesc> for Mutator {
+    type Error = GenericError;
+
+    fn try_from(value: StructDesc) -> Result<Self, Self::Error> {
+        let mut fuzzed = Self::default();
+        for desc in value.fields.iter() {
+            match desc.r#type {
+                FieldType::DATA => {
+                    if let Some(constraints) = desc.constraints.as_ref() {
+                        if let Some(size) = constraints.size {
+                            let field = Data::new(desc.name.clone(), desc.offset, size);
+                            fuzzed.add_field(field);
+                        } else {
+                            return Err(GenericError::Generic("missing size in constraints".to_string()))
+                        }
+                    } else {
+                        return Err(GenericError::Generic("missing constraints".to_string()))
+                    }
+                }
+                FieldType::PWSTR => {
+                    if let Some(constraints) = desc.constraints.as_ref() {
+                        if let (Some(value), Some(size)) = (constraints.value, constraints.size) {
+                            let field = PWStr::new(desc.name.clone(), desc.offset, value as u64, size);
+                            fuzzed.add_field(field);
+                        } else {
+                            return Err(GenericError::Generic("missing value and size in constraints".to_string()))
+                        }
+                    } else {
+                        return Err(GenericError::Generic("missing constraints".to_string()))
+                    }
+                }
+                FieldType::U8 => {
+                    let field = U8::new(desc.name.clone(), desc.offset, desc.constraints.clone());
+                    fuzzed.add_field(field);
+                }
+                FieldType::U16 => {
+                    let field = U16::new(desc.name.clone(), desc.offset, desc.constraints.clone());
+                    fuzzed.add_field(field);
+                }
+                FieldType::U32 => {
+                    let field = U32::new(desc.name.clone(), desc.offset, desc.constraints.clone());
+                    fuzzed.add_field(field);
+                }
+                FieldType::U64 => {
+                    let field = U64::new(desc.name.clone(), desc.offset, desc.constraints.clone());
+                    fuzzed.add_field(field);
+                }
+            };
+        }
+        Ok(fuzzed)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::mutation::*;
+
+    fn compute_checksum(data: &[u8]) -> u16 {
+        data.iter().fold(0, |acc, e| {
+            acc.wrapping_add((*e).into())
+        })
+    }
+
+    #[test]
+    fn test_parse_yaml() {
+        let path = "../tests/test.yaml";
+        let desc = StructDesc::load(path).unwrap();
+        dbg!(&desc);
+        assert_eq!(desc.fields.len(), 11);
+
+        assert_eq!(desc.fields[0].name, "magic");
+    }
+
+    #[test]
+    fn test_from_yaml() {
+        let path = "../tests/test.yaml";
+        let desc = StructDesc::load(path).unwrap();
+
+        let mut buffer = vec![0u8; 0x100];
+
+        let mut fuzzed: Mutator = desc.try_into().unwrap();
+        fuzzed.mutate(&mut buffer);
+
+        use pretty_hex::*;
+
+        println!("{:?}", buffer.hex_dump());
+
+        fuzzed.mutate(&mut buffer);
+
+        println!("{:?}", buffer.hex_dump());
+
+    }
+
+    #[test]
+    fn test_mutate_u8() {
+        let mut buffer = vec![0u8; 0x10];
+
+        let f = U8::new("test".to_string(), 4, None);
+
+        for _ in 0..0x100 {
+            f.mutate(&mut buffer);
+        }
+
+        let f = U8::new("test".to_string(), 0x20, None);
+
+        for _ in 0..0x100 {
+            let checksum = compute_checksum(&buffer);
+            f.mutate(&mut buffer);
+            assert_eq!(checksum, compute_checksum(&buffer));
+        }
+    }
+
+    #[test]
+    fn test_mutate_u16() {
+        let mut buffer = vec![0u8; 0x10];
+
+        let f = U16::new("test".to_string(), 4, None);
+
+        for _ in 0..0x100 {
+            f.mutate(&mut buffer);
+        }
+
+        let f = U16::new("test".to_string(), 0x20, None);
+
+        for _ in 0..0x100 {
+            let checksum = compute_checksum(&buffer);
+            f.mutate(&mut buffer);
+            assert_eq!(checksum, compute_checksum(&buffer));
+        }
+    }
+
+    #[test]
+    fn test_mutate_u32() {
+        let mut buffer = vec![0u8; 0x10];
+
+        let f = U32::new("test".to_string(), 4, None);
+
+        for _ in 0..0x100 {
+            f.mutate(&mut buffer);
+        }
+
+        let f = U32::new("test".to_string(), 0x20, None);
+
+        for _ in 0..0x100 {
+            let checksum = compute_checksum(&buffer);
+            f.mutate(&mut buffer);
+            assert_eq!(checksum, compute_checksum(&buffer));
+        }
+    }
+
+    #[test]
+    fn test_mutate_u64() {
+        let mut buffer = vec![0u8; 0x10];
+
+        let f = U64::new("test".to_string(), 4, None);
+
+        for _ in 0..0x100 {
+            f.mutate(&mut buffer);
+        }
+
+        let f = U64::new("test".to_string(), 0x20, None);
+
+        for _ in 0..0x100 {
+            let checksum = compute_checksum(&buffer);
+            f.mutate(&mut buffer);
+            assert_eq!(checksum, compute_checksum(&buffer));
+        }
+    }
+
+    #[test]
+    fn test_mutate_wstr() {
+        let mut buffer = vec![0u8; 0x10];
+
+        let f = PWStr::new("test".to_string(), 4, 4, 4);
+
+        for _ in 0..0x100 {
+            f.mutate(&mut buffer);
+        }
+
+        let f = PWStr::new("test".to_string(), 0x20, 4, 4);
+
+        for _ in 0..0x100 {
+            let checksum = compute_checksum(&buffer);
+            f.mutate(&mut buffer);
+            assert_eq!(checksum, compute_checksum(&buffer));
+        }
+    }
+
+    #[test]
+    fn test_mutate_data() {
+        let mut buffer = vec![0u8; 0x10];
+
+        let f = Data::new("test".to_string(), 4, 8);
+
+        for _ in 0..0x100 {
+            f.mutate(&mut buffer);
+        }
+
+        let f = Data::new("test".to_string(), 0x20, 8);
+
+        for _ in 0..0x100 {
+            let checksum = compute_checksum(&buffer);
+            f.mutate(&mut buffer);
+            assert_eq!(checksum, compute_checksum(&buffer));
+        }
+    }
+
+    #[test]
+    fn test_parse_yaml2() {
+        let path = "../tests/test2.yaml";
+        let desc = StructDesc::load(path).unwrap();
+        dbg!(&desc);
+        assert_eq!(desc.fields.len(), 1);
+
+        assert_eq!(desc.fields[0].name, "data");
+    }
+
+    #[test]
+    fn test_build_yaml() {
+        let mut desc = StructDesc::default();
+        let field = FieldDesc::default();
+        desc.fields.push(field);
+
+        let path = "../tests/generated.yaml";
+        desc.save(path).unwrap();
+
+        assert_eq!(desc.fields.len(), 1);
+    }
+
+}
 

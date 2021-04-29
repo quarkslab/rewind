@@ -120,7 +120,7 @@ pub enum ExitContext {
     UnsupportedFeature(VpContext, UnsupportedFeatureContext),
     X64InterruptWindow(VpContext, InterruptionDeliverableContext),
     X64Halt(VpContext),
-    X64ApicEoi(VpContext),
+    // X64ApicEoi(VpContext),
 
     // Additional exits that can be configured through partition properties
     X64MsrAccess(VpContext, MsrAccessContext),
@@ -1006,6 +1006,7 @@ impl Partition {
         }
     }
 
+    #[allow(dead_code)]
     pub fn unmap_physical_memory(
         &mut self,
         addr: usize,
@@ -1106,6 +1107,7 @@ impl Partition {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_physical_memory_valid(&mut self, addr: usize, size: usize) -> bool {
         let region = self.get_region(addr, size);
         region.is_some()
@@ -1121,6 +1123,7 @@ impl Partition {
         region
     }
 
+    #[allow(dead_code)]
     pub fn translate_virtual_address(&mut self, addr: usize) -> Result<u64, PartitionError> {
         let flags = WHV_TRANSLATE_GVA_FLAGS_WHvTranslateGvaFlagValidateRead;
         let mut result: WHV_TRANSLATE_GVA_RESULT = unsafe { std::mem::zeroed() };
@@ -1257,7 +1260,8 @@ pub fn create_partition() -> Result<WHV_PARTITION_HANDLE, PartitionError> {
     }
 }
 
-pub fn set_dr7(mut dr7: u64, slot: u8) -> u64 {
+#[allow(dead_code)]
+fn set_dr7(mut dr7: u64, slot: u8) -> u64 {
     dr7 |= 1 << (slot * 2);
 
     let condition = 0; // HW_EXECUTE
@@ -1270,7 +1274,8 @@ pub fn set_dr7(mut dr7: u64, slot: u8) -> u64 {
     dr7
 }
 
-pub fn clear_dr7(mut dr7: u64, slot: u8) -> u64 {
+#[allow(dead_code)]
+fn clear_dr7(mut dr7: u64, slot: u8) -> u64 {
     dr7 &= !(1 << (slot * 2));
     // remove the condition (RW0 - RW3) field from the appropriate slot (bits 16/17, 20/21, 24,25, 28/29)
     dr7 &= !(3 << ((slot * 4) + 16));
@@ -1280,7 +1285,8 @@ pub fn clear_dr7(mut dr7: u64, slot: u8) -> u64 {
     dr7
 }
 
-pub fn set_hw_breakpoint(context: &mut PartitionContext, address: u64) {
+#[allow(dead_code)]
+fn set_hw_breakpoint(context: &mut PartitionContext, address: u64) {
     let slot = 0;
     context.dr0.Reg64 = address;
     let dr7 = unsafe { context.dr7.Reg64 };

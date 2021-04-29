@@ -1,22 +1,29 @@
 
+#![warn(missing_docs)]
+
+//! Rewind CLI.
+
 use std::str::FromStr;
 
-pub use rewind_core::{fuzz, mem, mutation, trace, trace::Tracer};
+pub use rewind_core::{fuzz, mem, mutation, trace, corpus, trace::Tracer};
 pub use rewind_bochs::BochsTracer;
 
 #[cfg(windows)]
 pub use rewind_whvp::WhvpTracer;
 
-pub mod helpers;
+#[doc(hidden)]
+mod helpers;
 pub mod cli;
 
 pub use crate::cli::Rewind;
 
-pub use color_eyre;
+/// Supported backends
 #[derive(Debug)]
 pub enum BackendType {
+    /// Hyper-V
     #[cfg(windows)]
     Whvp,
+    /// Bochs
     Bochs
 }
 

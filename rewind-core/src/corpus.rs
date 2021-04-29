@@ -1,4 +1,6 @@
 
+//! Corpus management
+
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::File;
@@ -13,20 +15,27 @@ use std::sync::{Arc, RwLock};
 
 use crate::error;
 
+/// Corpus entry
 #[derive(Debug)]
 pub struct Entry {
+    /// Hash of data (computed with [`calculate_hash`])
     pub hash: u64,
+    /// Corpus data
     pub data: Vec<u8>,
 }
 
+/// Corpus
 #[derive(Debug)]
 pub struct Corpus {
+    /// Fuzzer workdir
     pub workdir: std::path::PathBuf,
+    /// Corpus entries
     pub members: HashMap<u64, Entry>,
     index: Arc<RwLock<usize>>,
 }
 
 impl Corpus {
+    /// Construct a new `Corpus`
     pub fn new<S>(workdir: S) -> Self 
     where S: Into<std::path::PathBuf> {
         // FIXME: check if corpus and crashes directories are created
@@ -37,6 +46,7 @@ impl Corpus {
        }
     }
 
+    /// Load corpus entries from fs
     pub fn load(&mut self) -> Result<usize, error::GenericError> {
         let path = Path::new(&self.workdir).join("corpus");
         let paths = fs::read_dir(path)?;
@@ -60,6 +70,7 @@ impl Corpus {
         Ok(total)
     }
 
+    /// Add an entry
     pub fn add(&mut self, input: Vec<u8>) -> Result<(), error::GenericError> {
         let hash = calculate_hash(&input);
         let entry = Entry {
@@ -70,6 +81,7 @@ impl Corpus {
         Ok(())
     }
 
+    /// Remove an entry
     pub fn remove(&mut self, path: PathBuf) -> Result<(), error::GenericError> {
         if path.extension() != Some(OsStr::new("bin")) {
             return Err(error::GenericError::Generic("bad extension".into()))
@@ -83,6 +95,7 @@ impl Corpus {
         Ok(())
     }
 
+    /// Round-robin rotate entries
     pub fn rotate(&mut self) -> Option<(&u64, &Entry)> {
         if self.members.is_empty() {
             return None
@@ -97,6 +110,7 @@ impl Corpus {
     }
 }
 
+/// Compute hash of `t`
 pub fn calculate_hash<T: Hash + ?Sized>(t: &T) -> u64 {
     let mut s = DefaultHasher::new();
     t.hash(&mut s);

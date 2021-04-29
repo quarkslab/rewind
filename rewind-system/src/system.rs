@@ -10,33 +10,41 @@ use rewind_core::mem::X64VirtualAddressSpace;
 
 use crate::pe;
 
+/// System error
 #[derive(Debug, Error)]
 pub enum SystemError {
+    /// Can't parse PE
     #[error("parse error: {}", .0)]
     ParseError(String),
 
+    /// Can't read debug info from virtual memory
     #[error("mem error: {0}")]
     MemError(#[from] rewind_core::mem::VirtMemError),
 
+    /// Deku error
     #[error("deku error: {0}")]
     DekuError(#[from] deku::error::DekuError),
 
+    /// Can't decode UTF-16 string
     #[error("decode error: {0}")]
     DecodeError(#[from] DecodeUtf16Error),
 
 }
 
+/// Operating system
 pub struct System <'a> {
 
+    /// Snapshot
     pub snapshot: &'a rewind_snapshot::DumpSnapshot<'a>,
 
+    /// Loaded modules
     pub modules: Vec<LoadedModule>,
 
 }
 
 impl <'a> System <'a>
 {
-
+    /// Constructor
     pub fn new(snapshot: &'a rewind_snapshot::DumpSnapshot<'a>) -> Result<Self, SystemError>
     {
         let system = Self {
@@ -47,12 +55,14 @@ impl <'a> System <'a>
         Ok(system)
     }
 
+    /// Get loaded modules
     pub fn get_loaded_modules(&self) -> Vec<LoadedModule> {
         let cr3 = self.snapshot.get_cr3();
         println!("cr3 is {:x}", cr3);
-        vec![]
+        todo!()
     } 
 
+    /// Parse snapshot and load modules
     pub fn load_modules(&mut self) -> Result<(), SystemError> {
         let cr3 = self.snapshot.get_cr3();
         // println!("cr3 is {:x}", cr3);
@@ -94,18 +104,21 @@ impl <'a> System <'a>
         Ok(())
     }
 
+    /// Get module by address
     pub fn get_module_by_address(&self, address: u64) -> Option<&LoadedModule> {
         self.modules.iter().find(|&module| {
             module.base <= address && address < module.base + module.size 
         })
     }
 
+    /// Get module by name
     pub fn get_module_by_name(&self, name: &str) -> Option<&LoadedModule> {
         self.modules.iter().find(|&module| {
             module.name == name 
         })
     }
 
+    /// Get PE FileInfo
     pub fn get_file_information(&self, module: &LoadedModule) -> Result<pe::FileInformation, SystemError> {
         let cr3 = self.snapshot.get_cr3();
 
@@ -123,6 +136,8 @@ impl <'a> System <'a>
         Ok(info)
 
     }
+
+    /// Get PE DebugInfo
     pub fn get_debug_information(&self, module: &LoadedModule) -> Result<pe::DebugInformation, SystemError> {
         let cr3 = self.snapshot.get_cr3();
 

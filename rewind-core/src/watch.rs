@@ -1,14 +1,26 @@
+
+//! Watch directories changes
+
 use std::{fs::File, path::PathBuf};
 use std::io::prelude::*;
 use std::sync::mpsc;
 
 use notify::Watcher;
 
+/// Notify event
 pub enum Event {
-    Create {path: PathBuf, data: Vec<u8>},
+    /// File created
+    Create {
+        /// Path
+        path: PathBuf,
+        /// Data
+        data: Vec<u8>
+    },
+    /// File deleted
     Remove(PathBuf)
 }
 
+/// Watch a directory for changes
 pub fn watch<S>(sender: &mpsc::Sender<Event>, path: S) -> notify::Result<()>
 where S: Into<std::path::PathBuf> {
     // Create a channel to receive the events.

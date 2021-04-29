@@ -34,6 +34,7 @@ impl From<whvp::PartitionContext> for Context {
     }
 }
 
+/// WHVP based tracer
 pub struct WhvpTracer <'a, S: Snapshot> {
     cache: mem::GpaManager,
     allocator: mem::Allocator,
@@ -46,6 +47,7 @@ impl <'a, S> WhvpTracer <'a, S>
 where S: Snapshot + mem::X64VirtualAddressSpace
 {
 
+    /// Constructor
     pub fn new(snapshot: &'a S) -> Result<Self, TracerError> {
         let allocator = mem::Allocator::new();
         let cache = mem::GpaManager::new();
@@ -62,7 +64,7 @@ where S: Snapshot + mem::X64VirtualAddressSpace
         Ok(tracer)
     }
 
-    pub fn map_page(&mut self, gpa: u64, data: &[u8]) -> Result<(), TracerError> {
+    fn map_page(&mut self, gpa: u64, data: &[u8]) -> Result<(), TracerError> {
         let partition = &mut self.partition;
         let allocator = &mut self.allocator;
         let base: usize = (gpa & !0xfff) as usize;
@@ -79,7 +81,7 @@ where S: Snapshot + mem::X64VirtualAddressSpace
         Ok(())
     }
 
-    pub fn fetch_page_from_snapshot(&mut self, gpa: u64, data: &mut [u8]) -> Result<(), TracerError> {
+    fn fetch_page_from_snapshot(&mut self, gpa: u64, data: &mut [u8]) -> Result<(), TracerError> {
         let snapshot = self.snapshot;
         let base: usize = (gpa & !0xfff) as usize;
         Snapshot::read_gpa(snapshot, base as u64, data)
@@ -88,7 +90,8 @@ where S: Snapshot + mem::X64VirtualAddressSpace
 
     }
 
-    pub fn patch_page<H: trace::Hook>(&mut self, params: &Params, access_type: whvp::MemoryAccessType, gva: u64, data: &mut [u8], hook: &mut H) -> Result<(), TracerError> {
+    #[allow(clippy::unnecessary_wraps)]
+    fn patch_page<H: trace::Hook>(&mut self, params: &Params, access_type: whvp::MemoryAccessType, gva: u64, data: &mut [u8], hook: &mut H) -> Result<(), TracerError> {
         if params.coverage_mode == CoverageMode::Hit && access_type == whvp::MemoryAccessType::Execute {
             // FIXME: add this to parameter
             // call hook patch page
@@ -96,12 +99,6 @@ where S: Snapshot + mem::X64VirtualAddressSpace
                 data.copy_from_slice(&[0xcc; 4096]);
 
             }
-            // let gva_base = 0xfffff80480689000;
-            // if gva_base <= gva && gva < gva_base + 0x1000 {
-            //     println!("ignoring gva range {:x}", gva_base);
-
-            // } else {
-            // }
         } 
         else {
             let gva_base = params.return_address & !0xfff;
@@ -133,16 +130,7 @@ where S: Snapshot + mem::X64VirtualAddressSpace
  
     }
 
-    fn handle_memory_access_inner<H: trace::Hook>(&mut self, params: &Params, gpa: u64, gva: u64, access_type: whvp::MemoryAccessType, trace: &mut Trace, hook: &mut H) -> Result<bool, TracerError> {
-        match access_type {
-            whvp::MemoryAccessType::Execute => {
-                trace.code += 1;
-            },
-            _ => {
-                trace.data += 1;
-            }
-        }
-
+    fn handle_memory_access_inner<H: trace::Hook>(&mut self, params: &Params, gpa: u64, gva: u64, access_type: whvp::MemoryAccessType, _trace: &mut Trace, hook: &mut H) -> Result<bool, TracerError> {
         let mut data: [u8; 4096] = [0; 4096];
         self.fetch_page_from_snapshot(gpa, &mut data)?;
 
@@ -825,11 +813,11 @@ mod test {
         let mut tracer = WhvpTracer::new(&snapshot).unwrap();
         let context = trace::ProcessorState::load(path.join("context.json")).unwrap();
         let mut params = trace::Params::default();
+        let mut hook = TestHook::default();
         params.return_address = snapshot.read_gva_u64(context.cr3, context.rsp).unwrap();
         params.coverage_mode = trace::CoverageMode::Instrs;
         params.save_context = true;
 
-        let mut hook = TestHook::default();
 
         tracer.set_state(&context).unwrap();
         let trace = tracer.run(&params, &mut hook).unwrap();

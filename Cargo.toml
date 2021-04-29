@@ -8,9 +8,13 @@ members = [
     "rewind-system",
     "rewind-tui",
     "rewind-cli",
+    "whvp-sys",
+]
+
+default-members = [
 ]
 
 exclude = [
+    "examples",
     "vendor",
-    "whvp-sys",
 ]

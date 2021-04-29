@@ -1,6 +1,9 @@
 
+//! Various helpers
+
 use std::cmp;
 
+/// Convert a number to human readable string
 pub fn convert(num: f64) -> String {
     let negative = if num.is_sign_positive() { "" } else { "-" };
     let num = num.abs();

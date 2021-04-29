@@ -28,4 +28,5 @@ rewind-whvp = { path = "../rewind-whvp" }
 
 [[bin]]
 name = "rewind"
+doc = false
 path = "src/main.rs"

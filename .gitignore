@@ -3,3 +3,6 @@ Cargo.lock
 .chrome
 tmp
 vendor
+old
+examples/store
+examples/snapshots

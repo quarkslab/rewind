@@ -27,7 +27,7 @@ pub struct ImageDosHeader {
     pub e_lfanew: u32,
 }
 
-pub const DOS_MAGIC: u16 = 0x5a4d;
+// pub const DOS_MAGIC: u16 = 0x5a4d;
 
 /// COFF Header
 #[derive(Debug, Default, DekuRead, DekuWrite)]
@@ -42,7 +42,7 @@ pub struct ImageFileHeader {
     pub characteristics: u16,
 }
 
-pub const PE_MAGIC: u32 = 0x0000_4550;
+// pub const PE_MAGIC: u32 = 0x0000_4550;
 
 #[derive(Debug, Default, DekuRead, DekuWrite)]
 pub struct ImageNtHeaders64 {

@@ -10,7 +10,7 @@ use thiserror::Error;
 use memmap::MmapOptions;
 
 use rewind_core::{fuzz, mutation, trace::{self, Tracer}, watch};
-use rewind_system::{system, pdbstore};
+use rewind_system::{System, PdbStore};
 use rewind_snapshot::DumpSnapshot;
 
 pub use crossterm::{
@@ -58,10 +58,10 @@ pub enum TuiError {
     CoreError(#[from] rewind_core::error::GenericError),
 
     #[error("store error: {0}")]
-    StoreError(#[from] rewind_system::pdbstore::StoreError),
+    StoreError(#[from] rewind_system::StoreError),
 
     #[error("system error: {0}")]
-    SystemError(#[from] rewind_system::system::SystemError),
+    SystemError(#[from] rewind_system::SystemError),
 
     #[error("snapshot error: {0}")]
     SnapshotError(#[from] rewind_core::snapshot::SnapshotError),
@@ -71,16 +71,22 @@ pub enum TuiError {
 }
 
 
+/// Global coverage (addresses, functions and modules) from corpus entries
 #[derive(Debug)]
 pub struct Collection {
+    /// Coverage
     pub coverage: BTreeSet<u64>,
+    /// Corpus
     pub corpus: HashMap<std::path::PathBuf, CorpusFile>,
+    /// Modules
     pub modules: HashMap<String, usize>,
+    /// Functions
     pub functions: HashMap<String, Function>,
 }
 
 impl Collection {
 
+    /// Constructor
     pub fn new() -> Self {
         Self {
             coverage: BTreeSet::new(),
@@ -517,7 +523,7 @@ fn replay_file<H: trace::Hook>(tx: &flume::Sender<Message>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_coverage(workdir: &PathBuf, system: &system::System, store: &mut pdbstore::PdbStore, corpus_path: PathBuf, fuzz_params: &fuzz::Params, mut trace: trace::Trace, collection: &mut Collection, hints: &mut mutation::MutationHint, tx: &flume::Sender<Message> ) -> Result<(), TuiError> {
+fn update_coverage(workdir: &PathBuf, system: &System, store: &mut PdbStore, corpus_path: PathBuf, fuzz_params: &fuzz::Params, mut trace: trace::Trace, collection: &mut Collection, hints: &mut mutation::MutationHint, tx: &flume::Sender<Message> ) -> Result<(), TuiError> {
 
     let mut corpus_file = CorpusFile::new(corpus_path.file_name().unwrap());
     corpus_file.seen = trace.seen.len() as u64;
@@ -588,7 +594,7 @@ fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>,
 
                 let mut tracer = rewind_bochs::BochsTracer::new(&snapshot);
 
-                let mut system = system::System::new(&snapshot)?;
+                let mut system = System::new(&snapshot)?;
                 system.load_modules()?;
 
                 let path = &store;
@@ -598,7 +604,7 @@ fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>,
                     std::fs::create_dir(path.join("symbols"))?;
                 }
 
-                let mut store = pdbstore::PdbStore::new(path)?;
+                let mut store = PdbStore::new(path)?;
 
                 let mut hints = mutation::MutationHint::new();
 
@@ -746,7 +752,7 @@ fn collect_instances_thread(control_rx: flume::Receiver<Control>, tx: flume::Sen
 }
 
 
-
+/// Display TUI
 pub fn display_tui<H: trace::Hook>(workdir: PathBuf, store: PathBuf) -> Result<(), TuiError> {
     let (tx, rx) = flume::unbounded();
     let (control_instance_tx, control_instance_rx) = flume::unbounded();
@@ -837,7 +843,8 @@ pub fn display_tui<H: trace::Hook>(workdir: PathBuf, store: PathBuf) -> Result<(
 }
 
 // FIXME: to rename => collect trace coverage, should return Coverage, should be in system
-pub fn parse_trace(collection: &mut Collection, trace: &mut trace::Trace, system: &system::System, store: &mut pdbstore::PdbStore) -> Result<(), TuiError> {
+/// Update collection with coverage from trace
+pub fn parse_trace(collection: &mut Collection, trace: &mut trace::Trace, system: &System, store: &mut PdbStore) -> Result<(), TuiError> {
 
     for &address in trace.seen.difference(&collection.coverage) {
         if let Some(module) = system.get_module_by_address(address) {

@@ -40,6 +40,7 @@ RUN $url = 'https://download.visualstudio.microsoft.com/download/pr/20130c62-1bc
         --quiet --wait --norestart --nocache `
         --installPath C:\BuildTools `
         --add Microsoft.Component.MSBuild `
+        --add Microsoft.VisualStudio.Component.VC.CMake.Project `
         --add Microsoft.VisualStudio.Component.Windows10SDK.17763 `
         --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64'; `
     Remove-Item 'C:\\vs_BuildTools.exe'; `
@@ -71,6 +72,15 @@ RUN [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::Sec
     cargo -V; `
     rustc -V
 
-COPY ./ ./
+RUN $url = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.1/LLVM-11.0.1-win64.exe'; `
+    Invoke-WebRequest -Uri $url -OutFile C:\llvm.exe; `
+    Start-Process C:\llvm.exe -Wait -ArgumentList '/S' `
+    Remove-Item C:\llvm.exe; 
 
-RUN cargo build --release
+COPY ./ ./rewind
+
+# $env:Path += ";C:\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\"
+# $env:LIBCLANG_PATH="C:\Program Files\LLVM\bin"
+# $env:RUSTFLAGS="-C target-feature=+crt-static"
+# RUN cargo build --release
+# Enable-WindowsOptionalFeature -FeatureName HypervisorPlatform -Online

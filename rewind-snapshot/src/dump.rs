@@ -22,7 +22,7 @@ pub struct RawDmp <'a>{
 impl <'a> RawDmp <'a> {
 
     pub fn parse(bytes: &'a [u8]) -> Result<Self, ParserError> {
-        let (header, _bytes) = LayoutVerified::<_, DmpHeader64>::new_from_prefix(bytes).ok_or_else(|| ParserError::ParseError("can't read header".into()))?;
+        let (header, run_base) = LayoutVerified::<_, DmpHeader64>::new_from_prefix(bytes).ok_or_else(|| ParserError::ParseError("can't read header".into()))?;
         if header.signature != 0x4547_4150 {
             return Err(ParserError::ParseError(format!("invalid signature, got {:x} instead of {:x}", header.signature, 0x4547_4150)))
         }
@@ -39,45 +39,78 @@ impl <'a> RawDmp <'a> {
 
         let (header_ext, _bytes) = LayoutVerified::<_, DmpHeader64Ext>::new_from_prefix(buffer).ok_or_else(|| ParserError::ParseError("can't read header".into()))?;
 
-        let buffer = &bytes[0x2000..];
-
-        let (bitmap, _bytes) = LayoutVerified::<_, DmpBitmap64>::new_from_prefix(buffer).ok_or_else(|| ParserError::ParseError("can't read bitmap".into()))?;
-
-        if bitmap.signature != 0x504d_4453{
-            return Err(ParserError::ParseError(format!("invalid signature, got {:x} instead of {:x}", bitmap.signature, 0x504d_4453)))
-        }
-
-        if bitmap.valid_dump != 0x504d_5544 {
-            return Err(ParserError::ParseError(format!("invalid signature, got {:x} instead of {:x}", bitmap.valid_dump, 0x504d_5544)))
-        }
- 
         let mut physmem = BTreeMap::new();
-        let mut physpage: usize = 0;
-        let mut addr: u64 = 0;
+        if header_ext.dump_type == 1 {
+            // full dump
+            let buffer = &run_base[..];
+            let (physical_memory_block_buffer, _bytes) = LayoutVerified::<_, PhysicalMemoryBlockBuffer>::new_from_prefix(buffer).ok_or_else(|| ParserError::ParseError("can't read physical memory block buffer".into()))?;
 
-        let bitmap_len: usize = ((bitmap.pages as usize - 1) / 64 + 1) * 8; 
-
-        let start_offset: usize = 0x2038;
-        let end_offset: usize = start_offset + bitmap_len;
-
-        if end_offset != bitmap.first_page as usize {
-            return Err(ParserError::ParseError("invalid bitmap".into()))
-        }
-
-        for b in &bytes[start_offset..end_offset] {
-            for ii in 0..8 {
-                let bit = 1 << ii;
-                if bit & b == bit {
-                    let offset = bitmap.first_page as usize + physpage * 0x1000;
-                    physmem.insert(addr, &bytes[offset..offset+0x1000]);
+            let mut base = 0x2000;
+            let mut physpage: usize = 0;
+            let runs = physical_memory_block_buffer.number_of_pages as usize;
+            for i in 0..runs {
+                let offset = 0x10usize * i;
+                let buffer = &run_base[0x10 + offset..];
+                let (run, _bytes) = LayoutVerified::<_, PhysicalMemoryRun>::new_from_prefix(buffer).ok_or_else(|| ParserError::ParseError("can't read physical memory block buffer".into()))?;
+                for page_index in 0..run.page_count {
+                    let pa = (run.base_page + page_index) * 0x1000;
+                    let page_base = base + page_index * 0x1000;
+                    let offset = page_base as usize;
+                    physmem.insert(pa, &bytes[offset..offset+0x1000]);
                     physpage += 1;
                 }
-                addr += 0x1000;
+
+                base += run.page_count * 0x1000;
+            }
+
+            if physical_memory_block_buffer.number_of_runs as usize != physpage {
+                return Err(ParserError::ParseError("invalid number of physical pages".into()))
+            }
+ 
+        } else if header_ext.dump_type == 5 {
+            // bitmap dump
+
+            let buffer = &bytes[0x2000..];
+            let (bitmap, _bytes) = LayoutVerified::<_, DmpBitmap64>::new_from_prefix(buffer).ok_or_else(|| ParserError::ParseError("can't read bitmap".into()))?;
+
+            if bitmap.signature != 0x504d_4453{
+                return Err(ParserError::ParseError(format!("invalid signature, got {:x} instead of {:x}", bitmap.signature, 0x504d_4453)))
+            }
+
+            if bitmap.valid_dump != 0x504d_5544 {
+                return Err(ParserError::ParseError(format!("invalid signature, got {:x} instead of {:x}", bitmap.valid_dump, 0x504d_5544)))
+            }
+    
+            let mut physpage: usize = 0;
+            let mut addr: u64 = 0;
+
+            let bitmap_len: usize = ((bitmap.pages as usize - 1) / 64 + 1) * 8; 
+
+            let start_offset: usize = 0x2038;
+            let end_offset: usize = start_offset + bitmap_len;
+
+            if end_offset != bitmap.first_page as usize {
+                return Err(ParserError::ParseError("invalid bitmap".into()))
+            }
+
+            for b in &bytes[start_offset..end_offset] {
+                for ii in 0..8 {
+                    let bit = 1 << ii;
+                    if bit & b == bit {
+                        let offset = bitmap.first_page as usize + physpage * 0x1000;
+                        physmem.insert(addr, &bytes[offset..offset+0x1000]);
+                        physpage += 1;
+                    }
+                    addr += 0x1000;
+                }
+            }
+
+            if bitmap.total_present_pages as usize != physmem.len() {
+                return Err(ParserError::ParseError("invalid bitmap".into()))
             }
         }
-
-        if bitmap.total_present_pages as usize != physmem.len() {
-            return Err(ParserError::ParseError("invalid bitmap".into()))
+        else {
+            return Err(ParserError::ParseError(format!("invalid dump type, got {:x}", header_ext.dump_type)))
         }
 
         Ok(Self {
@@ -85,8 +118,7 @@ impl <'a> RawDmp <'a> {
              context,
              header_ext,
              physmem,
-         }
-        )
+         })
     }
 
     pub fn cr3(&self) -> u64 {
@@ -95,17 +127,17 @@ impl <'a> RawDmp <'a> {
 
 }
 
-#[derive(Debug)]
+#[derive(FromBytes, Debug)]
 pub struct PhysicalMemoryRun {
     base_page: u64,
     page_count: u64,
 }
 
-#[derive(Debug)]
+#[derive(FromBytes, Debug)]
 pub struct PhysicalMemoryBlockBuffer {
     pub number_of_runs: u32,
+    pub _u: u32,
     pub number_of_pages: u64,
-    pub run: Vec<PhysicalMemoryRun>,
 }
 
 #[derive(FromBytes, Debug)]
@@ -233,8 +265,8 @@ mod tests {
     use memmap::*;
 
     #[test]
-    fn test_parser() {
-        let path = "./tests/mem.dmp";
+    fn test_bitmap_dmp() {
+        let path = "../tests/ConfigIoHandler_Safeguarded/mem.dmp";
         let fp = std::fs::File::open(path).unwrap();
     
         let bytes = unsafe { MmapOptions::new().map(&fp).unwrap() };
@@ -246,6 +278,31 @@ mod tests {
         assert_eq!(dump.cr3(), 0xb43c7002);
 
         assert_eq!(dump.physmem.len(), 849814);
+
+        let paddr = 0x4336000;
+        let page = *dump.physmem.get(&paddr).unwrap();
+
+        assert_eq!(page[0xc3c], 0x4c);
+        assert_eq!(page[0xc3d], 0x8b);
+        assert_eq!(page[0xc3e], 0xdc);
+        assert_eq!(page[0xc3f], 0x49);
+
+    }
+
+    #[test]
+    fn test_full_dmp() {
+        let path = "../tests/_ConfigurationFunctionIoHandler/mem.dmp";
+        let fp = std::fs::File::open(path).unwrap();
+    
+        let bytes = unsafe { MmapOptions::new().map(&fp).unwrap() };
+        let dump = RawDmp::parse(&bytes).unwrap();
+
+        assert_eq!(dump.context.rip, 0xfffff80719037f54);
+        assert_eq!(dump.context.rflags, 0x00040246);
+
+        assert_eq!(dump.cr3(), 0xa5a72002);
+
+        assert_eq!(dump.physmem.len(), 0xffc94);
 
         let paddr = 0x4336000;
         let page = *dump.physmem.get(&paddr).unwrap();

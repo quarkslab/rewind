@@ -1,4 +1,10 @@
 
+#![warn(missing_docs)]
+
+//! Snapshot support.
+//!
+//! Support full kernel dump and bitmap kernel dump
+
 
 use dump::ParserError;
 use rewind_core::snapshot::{Snapshot, SnapshotError};
@@ -6,12 +12,14 @@ use rewind_core::mem::{self, X64VirtualAddressSpace, VirtMemError};
 
 mod dump;
 
+/// Dump-based snapshot
 pub struct DumpSnapshot <'a> {
     dump: dump::RawDmp<'a>,
 }
 
 impl <'a> DumpSnapshot <'a> {
 
+    /// Constructor
     pub fn new(buffer: &'a [u8]) -> Result<Self, SnapshotError> {
         let dump = dump::RawDmp::parse(buffer)?;
 
@@ -23,10 +31,12 @@ impl <'a> DumpSnapshot <'a> {
 
     }
 
+    /// Get cr3
     pub fn get_cr3(&self) -> u64 {
         self.dump.cr3()
     }
 
+    /// Get module list address
     pub fn get_module_list(&self) -> u64 {
         self.dump.header.ps_loaded_module_list
     }

@@ -72,6 +72,7 @@ impl Progress {
         }
     }
 
+    #[allow(dead_code)]
     pub fn root(mut self) -> Progress {
         loop {
             if let Progress::Section = self {
@@ -81,6 +82,7 @@ impl Progress {
         }
     }
 
+    #[allow(dead_code)]
     pub fn error<D: fmt::Display>(&self, msg: D) {
         let mut t = term::stderr().unwrap();
 

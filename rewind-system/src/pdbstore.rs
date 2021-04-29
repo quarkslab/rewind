@@ -50,25 +50,31 @@ pub struct LoadedPdb {
     // pub structs: StructStore,
 }
 
+/// Store error
 #[derive(Error, Debug)]
 pub enum StoreError {
+    /// Can't download from symbol server
     #[error("error happened during server download: {0}")]
     DownloadError(String),
 
+    /// Unknown error
     #[error("unknown store error")]
     Unknown,
 
+    /// IO error
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
 
+    /// Pdb error
     #[error("pdb error: {0}")]
     PdbError(#[from] pdb::Error),
 
+    /// Network error
     #[error("network error: {0}")]
     NetworkError(#[from] reqwest::Error),
 }
 
-
+/// Pdb store
 pub struct PdbStore {
     path: PathBuf,
     pdbs: HashMap<u64, LoadedPdb>,
@@ -76,6 +82,7 @@ pub struct PdbStore {
 
 impl PdbStore {
 
+    /// Constructor
     pub fn new<P>(path: P) -> Result<Self, StoreError>
     where P: Into<PathBuf> 
     {
@@ -87,6 +94,7 @@ impl PdbStore {
 
     }
 
+    /// Load a pdb from disk
     pub fn load_pdb(&mut self, base: u64, pdbname: &str, guid: &str) -> Result<(), StoreError> {
         let pdb_path = self.path.join("symbols").join(pdbname).join(guid).join(pdbname);
 
@@ -186,6 +194,7 @@ impl PdbStore {
         Ok(())
     }
 
+    /// Get a symbol address
     pub fn resolve_name(&mut self, name: &str) -> Option<u64> {
         for (base, pdb) in self.pdbs.iter() {
             let symbol = pdb.symbols.iter().find(|symbol| {
@@ -200,6 +209,7 @@ impl PdbStore {
         None
     }
 
+    /// Resolve a procedure (not working, untested)
     pub fn resolve_proc(&mut self, procname: &str) -> Option<&Procedure> {
         for (_base, pdb) in self.pdbs.iter() {
             let procedure = pdb.procedures.iter().find(|(name, _procedure)| {
@@ -214,6 +224,7 @@ impl PdbStore {
         None
     }
 
+    /// Get nearest symbol from address
     pub fn resolve_address(&mut self, address: u64) -> Option<Symbol> {
         for (base, pdb) in self.pdbs.iter() {
             if address < *base {
@@ -263,6 +274,7 @@ impl PdbStore {
         None
     }
 
+    /// Download executable from symbol server
     pub fn download_pe(&self, name: &str, info: &pe::FileInformation) -> Result<(), StoreError> {
         // should return an enum with download, or already present
         // FIXME: symbol server should not be hardcoded
@@ -290,6 +302,7 @@ impl PdbStore {
         Ok(())
     }
 
+    /// Download pdb from symbol server
     pub fn download_pdb(&self, name: &str, guid: &str) -> Result<(), StoreError> {
         // should return an enum with download, or already present
         let directory = self.path.join("symbols").join(name).join(guid);
