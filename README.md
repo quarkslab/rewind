@@ -49,9 +49,7 @@ reverting the memory state of the partition it was also really easy to fuzz the 
 This work was presented at a French conference in 2020 (https://www.sstic.org/2020/presentation/fuzz_and_profit_with_whvp/) and released on github (https://github.com/quarkslab/whvp).
 
 The tool implements 2 possibilities to obtain the coverage. The first one leverages the classical TF (Trap Flag) to have INT1 interruptions on every instruction. 
-It requires to modify the target and it's slow. I would have preferred to use [MONITOR] trap flag. But WHVP doesn't offer this possibility.
-
-[MONITOR] http://hypervsir.blogspot.com/2014/11/monitor-trap-flag-mtf-usage-in-ept.html
+It requires to modify the target and it's slow. I would have preferred to use [MONITOR](http://hypervsir.blogspot.com/2014/11/monitor-trap-flag-mtf-usage-in-ept.html) trap flag. But WHVP doesn't offer this possibility.
 
 In order to have proper performances (required for fuzzing), I decided to reduce the precision of the coverage and add a mode when you only know when an instruction is executed for the first time.
 To do that I patch the pages fetched from the snapshot with 0xcc bytes (only for executable pages). When the cpu will execute these patched instructions the hypervisor will trap the exception and rewrite the instructions with the original code.
@@ -60,22 +58,18 @@ To overcome this one option would be to disassemble the code before mapping it a
 
 FIXME: need an image to illustrate that (use cng vuln ?)
 
-During my experiment I encountered several limitations when using WHVP. It's slow, like really slow. [VirtualBox] have some useful comments.
-
-[VirtualBox] https://www.virtualbox.org/browser/vbox/trunk/src/VBox/VMM/VMMR3/NEMR3Native-win.cpp
+During my experiment I encountered several limitations when using WHVP. It's slow, like really slow. [VirtualBox](https://www.virtualbox.org/browser/vbox/trunk/src/VBox/VMM/VMMR3/NEMR3Native-win.cpp) source code have some interesting comments :)
 
 So to have proper performance you really need to limit VM exits and it's incompatible if you want to use Hyper-V as a tracing hypervisor (since it requires a lot of VM exits).
 
-During the same time I started to use [bochs] (specially the instrumentation part) to check if the traces obtained by the tool were correct. Bochs was some kind of oracle to see if I had divergent traces.
-
-[bochs] https://bochs.sourceforge.io/cgi-bin/lxr/source/instrument/instrumentation.txt
+During the same time I started to use [bochs](https://bochs.sourceforge.io/cgi-bin/lxr/source/instrument/instrumentation.txt) (specially the instrumentation part) to check if the traces obtained by the tool were correct. Bochs was some kind of oracle to see if I had divergent traces.
 
 Bochs is faster than WHVP when doing full trace and you also have the benefits of having memory accesses plus the possibility to easily extract some immediates values (really useful to guide a mutation engine).
 
 I decided to add bochs as another backend. ``whvp`` was not a proper name anymore and I settled on ``rewind``.
 
-FIXME: explain the name
-FIXME: show a TUI screenshot
+- FIXME: explain the name
+- FIXME: show a TUI screenshot
 
 ## Prerequisites
 
@@ -106,7 +100,7 @@ Download the prebuilt bochs artifacts from bochscpu-build (https://github.com/yr
 $ curl.exe [verylongurlfromazurepipeline] --output bochs-x64-win.zip
 ```
 
-Extract the lib and bochs folders into the bochscpu checkout.
+Extract the ``lib`` and ``bochs`` folders into the bochscpu checkout.
 
 ```
 $ Expand-Archive -Path .\boch-x64-win.zip -DestinationPath .\
@@ -153,7 +147,7 @@ FIXME
 
 ## Examples
 
-A basic tutorial leveraging CVE-2020-17087 is provided in the [examples] directory
+A basic tutorial leveraging CVE-2020-17087 is provided in the [examples](/examples/) directory
 
 ## Design
 
@@ -196,7 +190,7 @@ The purpose of this is to fuzz a target function by applying mutations on an inp
 
 ## Roadmap
 
-- See [TODO.md]
+- See [TODO.md](/TODO.md)
 
 ## Known Bugs/Limitations
 
