@@ -2,16 +2,120 @@
 
 This tool is a PoC for a snapshot-based coverage-guided fuzzer targeting Windows kernel components.
 
-The idea is to clone the state of a running kernel (cpu and memory) into an Hyper-V partition to execute a specific function.
-A targeted small virtual machine is obtained by mapping the requested code and data needed to run this function. The state is read from a snapshot obtained from a kernel debugger.
-This small VM is then used to perform various tasks useful for a vulnerability researcher like getting an execution trace for the targeted function or fuzzing user-controlled inputs.
+The idea is to start from a snapshot of a live running system. This snapshot is composed of the physical memory pages along with the state of the cpu.
+This state is used to setup the initial state of a virtual cpu of some backend. With on-demand paging only the pages needed for the execution of the target function are read from the snapshot.
 
-It leverages WHVP (Windows Hypervisor Platform) API to provide access to a Hyper-V partition.
+As a result we obtain a small virtual machine.
+
+This small VM is then used to perform various tasks useful for a vulnerability researcher like getting an execution trace for the targeted function or fuzzing some user-controlled inputs.
+
+As of now 2 backends are supported:
+
+- ``WHVP`` backend leverages WHVP (Windows Hypervisor Platform) API to provide access to a Hyper-V partition.
 See https://docs.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform for more details.
+- ``Bochs`` backend leverages the Bochs emulator (https://bochs.sourceforge.io/)
 
-## Installation
+## Motivation
 
-WHVP (Windows Hypervisor Platform) must be enabled.
+I always enjoyed doing kernel vulnerability research specially on Windows kernel. The process
+always involve a mix of static and dynamic analysis. Doing dynamic analysis can quickly become
+tedious. The cycle debug / crash / reboot / reset all breakpoints is slow and painful. When you
+want to do some fuzzing, it often requires you to setup one or several virtual machines plus a
+kernel debugger and craft some ghetto scripts to handle crash detection...
+
+Doing snapshot with virtual machines helps but it's still slow as F...
+
+During 2018 Microsoft introduced a new set of API named Windows Hypervisor Platform (WHVP). These
+API allow to setup a partition (VM in hyper-V lingua) with some virtual processors and to have a
+control on the VM exits occurring in the virtual machine. It's almost like having your own
+vm-exit handler in userland. Quite handy to do useful things, for example:
+
+- https://github.com/ionescu007/Simpleator
+- https://github.com/gamozolabs/applepie
+
+
+So I started to play with WHVP and made a first PoC allowing me to execute
+in a Hyper-V partition some shellcode. It was written in Python and quite slow. This first PoC
+evolved quite quickly to some kind of snapshot-based tracer. I wanted to have something to
+bootstrap the virtual CPU and quite easy to setup. So since I was already using a kernel debugger
+to play with my target, I decided to use kernel dumps made with WinDbg as my snapshot. With that I just
+needed to setup a partition with a virtual cpu. The virtual cpu context is set with the context
+taken from the dump. Whenever the virtual cpu needs a physical page I use the ones from the dump.
+
+With this I was able to fork the state of the dump into a partition and then resume execution. 
+It allowed me to easily trace the execution of my target function. By modifying the arguments and
+reverting the memory state of the partition it was also really easy to fuzz the target.
+
+This work was presented at a French conference in 2020 (https://www.sstic.org/2020/presentation/fuzz_and_profit_with_whvp/) and released on github (https://github.com/quarkslab/whvp).
+
+The tool implements 2 possibilities to obtain the coverage. The first one leverages the classical TF (Trap Flag) to have INT1 interruptions on every instruction. 
+It requires to modify the target and it's slow. I would have preferred to use [MONITOR] trap flag. But WHVP doesn't offer this possibility.
+
+[MONITOR] http://hypervsir.blogspot.com/2014/11/monitor-trap-flag-mtf-usage-in-ept.html
+
+In order to have proper performances (required for fuzzing), I decided to reduce the precision of the coverage and add a mode when you only know when an instruction is executed for the first time.
+To do that I patch the pages fetched from the snapshot with 0xcc bytes (only for executable pages). When the cpu will execute these patched instructions the hypervisor will trap the exception and rewrite the instructions with the original code.
+It's like having a unique software breakpoint set on every instruction. It works 95% of the time but in particular piece of code (ones with jump tables for example) it will fail because data will be replaced.
+To overcome this one option would be to disassemble the code before mapping it and only patch what is needed (maybe next time).
+
+FIXME: need an image to illustrate that (use cng vuln ?)
+
+During my experiment I encountered several limitations when using WHVP. It's slow, like really slow. [VirtualBox] have some useful comments.
+
+[VirtualBox] https://www.virtualbox.org/browser/vbox/trunk/src/VBox/VMM/VMMR3/NEMR3Native-win.cpp
+
+So to have proper performance you really need to limit VM exits and it's incompatible if you want to use Hyper-V as a tracing hypervisor (since it requires a lot of VM exits).
+
+During the same time I started to use [bochs] (specially the instrumentation part) to check if the traces obtained by the tool were correct. Bochs was some kind of oracle to see if I had divergent traces.
+
+[bochs] https://bochs.sourceforge.io/cgi-bin/lxr/source/instrument/instrumentation.txt
+
+Bochs is faster than WHVP when doing full trace and you also have the benefits of having memory accesses plus the possibility to easily extract some immediates values (really useful to guide a mutation engine).
+
+I decided to add bochs as another backend. ``whvp`` was not a proper name anymore and I settled on ``rewind``.
+
+FIXME: explain the name
+FIXME: show a TUI screenshot
+
+## Prerequisites
+
+Obviously you need Rust (installation tested on Windows and Linux with Rust 1.50). CMake is also needed by some dependencies.
+
+## Git
+
+First clone the repository:
+
+```
+$ git clone gitlab@gitlab.qb:daumaitre/rewind.git
+```
+
+Continue with the installation of bochs backend
+
+### Bochs
+
+Clone bochscpu (https://github.com/yrp604/bochscpu) repository in the ``vendor`` directory:
+
+```
+$ cd vendor
+$ git clone https://github.com/yrp604/bochscpu
+```
+
+Download the prebuilt bochs artifacts from bochscpu-build (https://github.com/yrp604/bochscpu-build)
+
+```
+$ curl.exe [verylongurlfromazurepipeline] --output bochs-x64-win.zip
+```
+
+Extract the lib and bochs folders into the bochscpu checkout.
+
+```
+$ Expand-Archive -Path .\boch-x64-win.zip -DestinationPath .\
+$ copy -Recurse .\bochs-x64-win\msvc\* .\bochscpu\
+```
+
+### WHVP
+
+On Windows WHVP will also be built as backend. 
 
 In a elevated powershell session, use the following command to check if WHVP is enabled:
 
@@ -26,83 +130,38 @@ State            : Enabled
 CustomProperties :
 ```
 
-### Python wheel
+### Build from master branch
 
-A python wheel is provided in the releases section.
-So the installation is quite straightforward:
-
-```
-# create a python virtual env (not mandatory)
-
-$ py -m venv venv
-$ .\venv\Scripts\activate
-
-# install wheel with pip
-
-$ pip install whvp_py-0.1.0-cp37-none-win_amd64.whl
-```
-
-### Source
-
-If you prefer to build from source, you need to proceed as follows.
-
-First you need to install LLVM and set the `LIBCLANG_PATH` environment variable (required by `bindgen`)
+You need to install LLVM and set the `LIBCLANG_PATH` environment variable (required by `bindgen`)
 See https://rust-lang.github.io/rust-bindgen/requirements.html for a detailed explanation.
 
 ```
 $ $env:LIBCLANG_PATH="C:\Program Files\LLVM\bin"
 ```
 
-Then create a python virtual env:
+From there you should be able to build ``rewind`` (nightly required because of ``unwind_attributes`` in ``bochscpu`` crate):
 
 ```
-$ py -m venv venv
-$ .\venv\Scripts\activate
+$ cargo +nightly build --release --all
 ```
 
-Go to the `whvp-py` directory:
+``rewind`` binary will be available in the ``target/release`` directory.
 
-```
-$ cd whvp/whvp-py
-```
+## Typical usage
 
-Install requirements:
+FIXME
 
-```
-$ pip install -r requirements.txt
-```
+## Examples
 
-Then with `maturin` you can either build locally with:
+A basic tutorial leveraging CVE-2020-17087 is provided in the [examples] directory
 
-```
-$ maturin develop
-```
+## Design
 
-Or build Python wheels for easy installation
+FIXME
 
-```
-$ maturin build --release
-```
+## Snapshots
 
-Some tests are provided and can be run with `pytest`:
-
-```
-$ pytest -v tests
-```
-
-## Usage
-
-Two types of snapshots are supported. Both leverage pykd to access the state of Windbg.
-The first type of snapshot use `rpyc` and `pykd` to provide an access to a live Windbg instance.
-To use it you need to launch the `pykd_rpyc_server.py` script in your Windbg instance.
-
-```
-kd> !load pykd
-kd> !py -3 -g [path]\pykd_rpyc_server.py
-running rpyc server
-```
-
-The second type of snapshot use also `pykd` to make dump a valid context from a Windbg instance.
+To easily obtain a snapshot from windbg, a script leveraging `pykd` is provided.
 To use it you need to launch the `pykd_dump_context.py` script in your Windbg instance.
 
 ```
@@ -111,31 +170,13 @@ kd> !py -3 -g [path]\pykd_dump_context.py [directory]
 [go make a coffee, it can take a while]
 ```
 
-The first type of snapshot is more adapted for a dynamic approach (when you are searching for a potential function to fuzz).
-Once you find a potential candidate, use the second snapshot to make a dump. You will be able to use your debugger for another task.
-
-A snapshot consists of 3 files:
+The resulting snapshot consists of 3 files:
 
 - `context.json`: initial cpu state
 - `params.json`: tracer parameters (expected return address, excluded addresses)
 - `mem.dmp`: Windbg dump file
 
-3 tools are provided.
-
-The first one is a tracer `whvp-tracer` (located in `whvp/whvp-py/scripts/tracer.py`)
-
-```
-Usage: tracer.py [OPTIONS]
-
-Options:
-  --snapshot TEXT             [default: localhost:18861]
-  --coverage [no|hit|instrs]  [default: no]
-  --save-context              [default: False]
-  --save-instructions         [default: False]
-  --save-trace TEXT
-  --replay TEXT
-  --help                      Show this message and exit.
-```
+## Tracer
 
 Its goal is to execute a target function in a Hyper-V partition and save an execution trace if needed.
 
@@ -149,108 +190,24 @@ The trace can be saved into a `json` file for further processing or analysis.
 You can choose to record only the encountered addresses or the full processor context.
 You can also replay a specific input (for example found by the fuzzer).
 
-```
-$ python .\whvp\scripts\tracer.py --coverage instrs
-2020-05-20 16:36:33,964 INFO  [whvp] running tracer
-2020-05-20 16:36:34,319 INFO  [whvp_core::trace] setting bp on excluded address nt!KeBugCheck (fffff8076926a880)
-2020-05-20 16:36:34,320 INFO  [whvp_core::trace] setting bp on excluded address nt!KeBugCheckEx (fffff8076926a8a0)
-2020-05-20 16:36:35,423 INFO  [whvp] executed 37261 instruction(s), 18172 were unique in 1.4070376s (Success)
-2020-05-20 16:36:35,426 INFO  [whvp] 132 page(s) were modified
-2020-05-20 16:36:35,432 DEBUG [whvp_core::mem] destructing allocator
-2020-05-20 16:36:35,434 DEBUG [whvp_core::whvp] destructing partition
-```
+## Fuzzer
 
-The second one is the fuzzer `whvp-fuzzer` (located in `whvp/whvp-py/scripts/fuzzer.py`)
+The purpose of this is to fuzz a target function by applying mutations on an input buffer.
 
-```
-Usage: fuzzer.py [OPTIONS] [CONTEXT]
+## Roadmap
 
-Options:
-  --snapshot TEXT             [default: localhost:18861]
-  --coverage [no|hit|instrs]  [default: hit]
-  --max-time INTEGER          [default: 0]
-  --max-iterations INTEGER    [default: 0]
-  --display-delay INTEGER     [default: 1]
-  --stop-on-crash             [default: False]
-  --input TEXT                [required]
-  --input-size TEXT           [required]
-  --workdir TEXT              [required]
-  --resume TEXT
-  --help                      Show this message and exit.
-```
-
-The purpose of the script is to fuzz a target function by applying mutations on an input buffer.
-
-```
-$ python .\whvp\scripts\fuzzer.py --snapshot [path] --max-time 10 --input 0xffffcb8c1e3059a8 --input-size 0x40 --workdir .\fuzz
-2020-05-20 16:39:13,172 INFO  [whvp] loading dump
-2020-05-20 16:39:14,949 INFO  [whvp] fuzzer workdir is ..\tmp\fuzz\a6159ce2-d3d5-417f-8bfe-bfb1b042c261
-2020-05-20 16:39:14,952 INFO  [whvp_core::fuzz] loaded 0 file(s) to corpus
-2020-05-20 16:39:14,952 INFO  [whvp_core::fuzz] first execution to map memory
-2020-05-20 16:39:15,079 INFO  [whvp_core::fuzz] reading input
-2020-05-20 16:39:15,080 INFO  [whvp_core::fuzz] add first trace to corpus
-2020-05-20 16:39:15,085 INFO  [whvp_core::fuzz] discovered 2245 new address(es), adding file to corpus
-2020-05-20 16:39:15,086 INFO  [whvp_core::fuzz] start fuzzing
-2020-05-20 16:39:15,090 INFO  [whvp_core::fuzz] discovered 51 new address(es), adding file to corpus
-2020-05-20 16:39:15,093 INFO  [whvp_core::fuzz] discovered 8 new address(es), adding file to corpus
-2020-05-20 16:39:15,097 INFO  [whvp_core::fuzz] discovered 8 new address(es), adding file to corpus
-2020-05-20 16:39:15,102 INFO  [whvp_core::fuzz] discovered 6 new address(es), adding file to corpus
-2020-05-20 16:39:15,104 INFO  [whvp_core::fuzz] discovered 3 new address(es), adding file to corpus
-2020-05-20 16:39:15,121 INFO  [whvp_core::fuzz] discovered 2 new address(es), adding file to corpus
-2020-05-20 16:39:15,123 INFO  [whvp_core::fuzz] discovered 2 new address(es), adding file to corpus
-2020-05-20 16:39:15,190 INFO  [whvp_core::fuzz] discovered 2 new address(es), adding file to corpus
-2020-05-20 16:39:15,509 INFO  [whvp_core::fuzz] discovered 426 new address(es), adding file to corpus
-2020-05-20 16:39:15,510 INFO  [whvp_core::fuzz] got abnormal exit, saving input to "..\\tmp\\fuzz\\a6159ce2-d3d5-417f-8bfe-bfb1b042c261\\crashes\\687aab7cdb9415f2.bin"
-2020-05-20 16:39:15,952 INFO  [whvp_core::fuzz] 1082 executions, 1082 exec/s, coverage 2753, new 508, code 143.36 kB, data 270.34 kB, corpus 7, crashes 1
-[snip]
-2020-05-20 16:39:23,962 INFO  [whvp_core::fuzz] 10808 executions, 1201 exec/s, coverage 2767, new 0, code 143.36 kB, data 270.34 kB, corpus 9, crashes 41
-2020-05-20 16:39:24,616 INFO  [whvp_core::fuzz] got abnormal exit, saving input to "..\\tmp\\fuzz\\a6159ce2-d3d5-417f-8bfe-bfb1b042c261\\crashes\\45d0b5f9c92b4e69.bin"
-2020-05-20 16:39:24,789 INFO  [whvp_core::fuzz] got abnormal exit, saving input to "..\\tmp\\fuzz\\a6159ce2-d3d5-417f-8bfe-bfb1b042c261\\crashes\\b816dfa892108baf.bin"
-2020-05-20 16:39:24,952 INFO  [whvp_core::fuzz] fuzzing session ended after 10.0006871s and 12053 iteration(s)
-2020-05-20 16:39:24,954 DEBUG [whvp_core::mem] destructing allocator
-2020-05-20 16:39:24,955 DEBUG [whvp_core::whvp] destructing partition
-```
-
-The last one is a triager `whvp-triage` (located in `whvp/whvp-py/scripts/triage.py`)
-
-```
-Usage: triage.py [OPTIONS] CRASHES OUTPUT
-
-Options:
-  --snapshot TEXT  [default: localhost:18861]
-  --limit INTEGER
-  --help           Show this message and exit.
-```
-
-Its purpose is to triage the crashes obtained by the fuzzer.
-It works by replaying crashing inputs and comparing the last executed instructions (by using the `limit` parameter)
-
-```
-$ python .\whvp\scripts\triage.py --snapshot [path] .\fuzz\7ea6bb7e-167e-4ca0-9287-0670331881d2\crashes\ .\triage
-2020-05-20 16:44:01,077 INFO  [whvp] loading dump
-2020-05-20 16:44:02,896 INFO  [whvp] loaded 64 crash(es)
-2020-05-20 16:44:02,896 INFO  [whvp] gathering coverage
-2020-05-20 16:44:02,897 INFO  [whvp] coverage exists for 14ad693179e1d296.bin, loading from file
-2020-05-20 16:44:02,953 INFO  [whvp] coverage exists for 1713963ad35a010b.bin, loading from file
-2020-05-20 16:44:03,001 INFO  [whvp] coverage exists for 17e89b73dbde7cdb.bin, loading from file
-2020-05-20 16:44:03,069 INFO  [whvp] coverage exists for 1bd8594ab1972c6e.bin, loading from file
-[snip]
-2020-05-20 16:44:07,028 INFO  [whvp] triaged 64 crash(es)
-2020-05-20 16:44:07,029 INFO  [whvp] found 2 unique crash(es)
-2020-05-20 16:44:07,029 INFO  [whvp] 14ad693179e1d296.bin has 53 duplicate(s)
-2020-05-20 16:44:07,186 INFO  [whvp] 3a85c8f8773d0ac9.bin has 8 duplicate(s)
-2020-05-20 16:44:07,204 DEBUG [whvp_core::mem] destructing allocator
-2020-05-20 16:44:07,204 DEBUG [whvp_core::whvp] destructing partition
-```
+- See [TODO.md]
 
 ## Known Bugs/Limitations
 
 - This software is in a very early stage of development and an ongoing experiment.
 - Sometimes the tracer is unable to trace the target function (most common issue is invalid virtual cpu state).
-- When using `hit` coverage mode, the tracer will misbehave on some functions (it is the case with some switch tables). The reason is that each byte is replaced by software breakpoints (including data if they are present in a executable page).
-- The target function will be executed with a unique virtual processor, you have no support for hardware or OS interrupts. As a result, it will not be interrupted (so no support for asynchronous code).
-- This tool is best used for targetting small synchronous functions.
+- When using `hit` coverage mode, the tracer will misbehave on some functions (it is the case with some switch tables). The reason is that each byte is replaced by software breakpoints (including data if they are present in a executable page). A better way to do that would be to obtain the list of all the basic blocks from a disassembler for example.
+- The target function will be executed with a unique virtual processor, you have no support for hardware so it's probable something will be wrong if you trace hardware related functions
+- This tool is best used for targetting specific functions
 - To have best performances, minimize VM exits and modified pages because they can be really costly and will increase the time needed to execute the function. 
+- Don't use hyper-V to do snapshots since enlightments are not handled
+- Some symbols are not resolved properly
 
 ## License
 

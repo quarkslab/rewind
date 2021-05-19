@@ -15,7 +15,7 @@ pub enum SnapshotError {
     MissingPage(u64),
 
     /// IO error
-    #[error(transparent)]
+    #[error("File error: {:?}", .0)]
     FileError(#[from]std::io::Error)
 
 }
@@ -26,5 +26,10 @@ pub trait Snapshot {
     /// Read physical address from snapshot
     fn read_gpa(&self, gpa: u64, buffer: &mut [u8]) -> Result<(), SnapshotError>;
 
+    /// Get cr3
+    fn get_cr3(&self) -> u64;
+
+    /// Get module list address
+    fn get_module_list(&self) -> u64;
 }
 

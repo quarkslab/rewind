@@ -376,8 +376,6 @@ pub struct Trace {
     pub seen: BTreeSet<u64>,
     /// Memory accesses
     pub mem_access: Vec<(u64, u64, u64, usize, String)>,
-    // pub code: usize,
-    // pub data: usize,
 }
 
 impl Trace {
@@ -392,8 +390,6 @@ impl Trace {
             seen: BTreeSet::new(),
             status: EmulationStatus::Success,
             mem_access: Vec::new(),
-            // code: 0,
-            // data: 0,
         }
     }
 

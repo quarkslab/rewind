@@ -1,4 +1,4 @@
-use std::{io::{Read, Write}, path::PathBuf};
+use std::{io::{Read, Write}, path::PathBuf, time::Duration};
 use std::collections::{HashMap, BTreeSet};
 use std::thread;
 use std::sync::mpsc;
@@ -9,9 +9,9 @@ use thiserror::Error;
 
 use memmap::MmapOptions;
 
-use rewind_core::{fuzz, mutation, trace::{self, Tracer}, watch};
+use rewind_core::{fuzz, mem::X64VirtualAddressSpace, mutation, snapshot::Snapshot, trace::{self, Tracer}, watch};
 use rewind_system::{System, PdbStore};
-use rewind_snapshot::DumpSnapshot;
+use rewind_snapshot::{SnapshotKind, FileSnapshot, DumpSnapshot};
 
 pub use crossterm::{
     event::{self, Event, KeyCode, EnableMouseCapture, DisableMouseCapture},
@@ -151,7 +151,6 @@ fn draw(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, app: &mut App) {
 }
 
 fn draw_statistics(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app: &mut App) {
-
     let active_instances: Vec<&fuzz::Stats> = app.instances_widget.instances.iter().filter(|i| {
         i.last_updated() < std::time::Duration::from_secs(10)
     }).collect();
@@ -173,8 +172,7 @@ fn draw_statistics(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect,
     let title_style = Style::default()
             .add_modifier(Modifier::BOLD);
     
-    // FIXME: rajouter le repertoire de fuzzing
-    // afficher le snapshot (fuzz_params)
+    // FIXME: add fuzzing directory and snapshot path
     let title = Span::styled(
         "Statistics",
         title_style
@@ -188,31 +186,23 @@ fn draw_statistics(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect,
 }
 
 fn draw_instances(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app: &mut App) {
-
-    let up_style = Style::default().fg(Color::Green);
-
+    let up_style = Style::default();
     let selected_style = Style::default().add_modifier(Modifier::REVERSED);
 
-    let failure_style = Style::default();
-        // .add_modifier(Modifier::CROSSED_OUT);
-
-    let rows = app.instances_widget.instances.iter().map(|s| {
-        let style = if s.last_updated() < std::time::Duration::from_secs(10) {
-            up_style
+    let rows: Vec<Row> = app.instances_widget.instances.iter().filter_map(|s| {
+        if s.last_updated() < std::time::Duration::from_secs(10) {
+            let elapsed = (s.updated - s.start).to_std().unwrap();
+            let num_seconds = std::cmp::max(1, (s.updated - s.start).num_seconds());
+            let execs = s.iterations / num_seconds as u64;
+            Some(Row::new(vec![format!("{}", s.uuid),
+                        format!("{:?}", elapsed),
+                        format!("{}", s.iterations),
+                        format!("{}", execs),
+                        ]).style(up_style))
         } else {
-            failure_style
-        };
-
-        let elapsed = (s.updated - s.start).to_std().unwrap();
-        let num_seconds = std::cmp::max(1, (s.updated - s.start).num_seconds());
-        let execs = s.iterations / num_seconds as u64;
-        Row::new(vec![format!("{}", s.uuid),
-                      format!("{:?}", elapsed),
-                      format!("{}", s.iterations),
-                      format!("{}", execs),
-                      format!("{}", s.coverage),
-                      ]).style(style)
-    });
+            None
+        } 
+    }).collect();
 
     let border_type = match app.active_widget {
         ActiveWidget::Instances => BorderType::Thick,
@@ -224,7 +214,7 @@ fn draw_instances(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
         _ => Style::default()
     };
 
-    let title = format!("Instances ({} fuzzer(s))", app.instances_widget.instances.len());
+    let title = format!("Actives instances ({} fuzzer(s))", rows.len());
     let title = Span::styled(
         title,
         title_style
@@ -237,7 +227,7 @@ fn draw_instances(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
 
     let table = Table::new(rows)
         .header(
-            Row::new(vec!["Instance", "Time", "Iterations", "Exec/s", "Coverage"])
+            Row::new(vec!["Instance", "Time", "Iterations", "Exec/s"])
                 .style(header_style)
                 .bottom_margin(1),
         )
@@ -245,10 +235,9 @@ fn draw_instances(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, 
         .highlight_style(selected_style)
         .widths(&[
             Constraint::Percentage(40),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
         ]);
 
     f.render_stateful_widget(table, area, &mut app.instances_widget.state);
@@ -261,6 +250,8 @@ fn draw_corpus(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app
         Row::new(vec![format!("{}", item.path.display()),
                       format!("{}", item.count),
                       format!("{}", item.seen),
+                      format!("{:?}", item.duration),
+                      format!("{}", item.modified_pages),
                       ])
     });
 
@@ -283,7 +274,7 @@ fn draw_corpus(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app
 
     let table = Table::new(rows)
         .header(
-            Row::new(vec!["File", "Instructions", "Unique"])
+            Row::new(vec!["File", "Instructions", "Unique", "Time", "Modified pages"])
                 .style(Style::default().fg(Color::Yellow))
                 .bottom_margin(1),
         )
@@ -291,8 +282,10 @@ fn draw_corpus(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app
         .highlight_style(selected_style)
         .widths(&[
             Constraint::Percentage(40),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
         ]);
 
     f.render_stateful_widget(table, area, &mut app.corpus_widget.state);
@@ -409,6 +402,8 @@ fn draw_crashes(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, ap
         Row::new(vec![format!("{}", item.path.display()),
                       format!("{}", item.count),
                       format!("{}", item.seen),
+                      format!("{:?}", item.duration),
+                      format!("{}", item.modified_pages)
                       ])
     });
 
@@ -431,7 +426,7 @@ fn draw_crashes(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, ap
 
     let table = Table::new(rows)
         .header(
-            Row::new(vec!["File", "Instructions", "Unique"])
+            Row::new(vec!["File", "Instructions", "Unique", "Time", "Modified pages"])
                 .style(Style::default().fg(Color::Yellow))
                 .bottom_margin(1),
         )
@@ -439,8 +434,10 @@ fn draw_crashes(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, ap
         .highlight_style(selected_style)
         .widths(&[
             Constraint::Percentage(40),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
         ]);
 
     f.render_stateful_widget(table, area, &mut app.crashes_widget.state);
@@ -474,7 +471,7 @@ fn draw_logs(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, app: 
 
 fn replay_file<H: trace::Hook>(tx: &flume::Sender<Message>,
         path: &std::path::Path,
-        tracer: &mut rewind_bochs::BochsTracer<DumpSnapshot>,
+        tracer: &mut rewind_bochs::BochsTracer<SnapshotKind>,
         context: &trace::ProcessorState,
         trace_params: &trace::Params,
         fuzz_params: &fuzz::Params) -> Result<trace::Trace, TuiError> {
@@ -510,24 +507,26 @@ fn replay_file<H: trace::Hook>(tx: &flume::Sender<Message>,
     let _mem = rewind_core::helpers::convert((pages * 0x1000) as f64);
    
     tx.send(Message::Log(format!("executed {} instruction(s) in {:?} ({:?})", trace.coverage.len(), t, trace.status)))?;
-    // tx.send(Message::Log(format!("seen {} unique address(es)", trace.seen.len())))?;
-    // tx.send(Message::Log(format!("mapped {} page(s) ({})", pages, mem)))?;
 
     hook.handle_trace(&mut trace)?;
-
-    let _pages = tracer.restore_snapshot()?;
-    // tx.send(Message::Log(format!("{:?} page(s) were modified", pages)))?;
 
     Ok(trace)
 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_coverage(workdir: &PathBuf, system: &System, store: &mut PdbStore, corpus_path: PathBuf, fuzz_params: &fuzz::Params, mut trace: trace::Trace, collection: &mut Collection, hints: &mut mutation::MutationHint, tx: &flume::Sender<Message> ) -> Result<(), TuiError> {
+fn update_coverage<S: Snapshot + X64VirtualAddressSpace>(workdir: &PathBuf, system: &System<S>, store: &mut PdbStore, corpus_path: PathBuf, fuzz_params: &fuzz::Params, mut trace: trace::Trace, modified_pages: usize, collection: &mut Collection, hints: &mut mutation::MutationHint, tx: &flume::Sender<Message> ) -> Result<(), TuiError> {
 
     let mut corpus_file = CorpusFile::new(corpus_path.file_name().unwrap());
     corpus_file.seen = trace.seen.len() as u64;
     corpus_file.count = trace.coverage.len() as u64;
+
+    corpus_file.modified_pages = modified_pages;
+
+    corpus_file.duration = match (trace.start, trace.end) {
+        (Some(start), Some(end)) => end - start,
+        _ => Duration::from_millis(0)
+    };
 
     let functions = collection.functions.clone();
     tx.send(Message::Coverage(functions))?;
@@ -558,8 +557,8 @@ fn update_coverage(workdir: &PathBuf, system: &System, store: &mut PdbStore, cor
             }
         }
 
-        parse_trace(collection, &mut trace, &system, store)?;
         trace.save(workdir.join("traces").join(format!("{}.json", corpus_path.file_name().unwrap().to_str().unwrap())))?;
+        parse_trace(collection, &mut trace, &system, store)?;
     }
 
     Ok(())
@@ -577,20 +576,26 @@ fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>,
 
                 let snapshot_path = &fuzz_params.snapshot_path;
 
-                let dump_path = snapshot_path.join("mem.dmp");
+                let buffer;
+                let snapshot = if snapshot_path.join("mem.dmp").exists() {
+                    let dump_path = snapshot_path.join("mem.dmp");
 
-                let fp = std::fs::File::open(&dump_path)?;
-                let buffer = unsafe { MmapOptions::new().map(&fp)? };
+                    let fp = std::fs::File::open(&dump_path)?;
+                    buffer = unsafe { MmapOptions::new().map(&fp)? };
 
-                let snapshot = DumpSnapshot::new(&buffer)?;
+                    let snapshot = DumpSnapshot::new(&buffer)?;
+                    SnapshotKind::DumpSnapshot(snapshot)
+                } else {
+                    let snapshot = FileSnapshot::new(&snapshot_path)?;
+                    SnapshotKind::FileSnapshot(snapshot)
+                };
 
                 let context_path = snapshot_path.join("context.json");
                 let context = trace::ProcessorState::load(&context_path)?;
 
                 let params_path = snapshot_path.join("params.json");
-                let trace_params = trace::Params::load(&params_path)?;
-
-                // trace_params.max_duration = std::time::Duration::from_secs(args.max_time);
+                let mut trace_params = trace::Params::load(&params_path)?;
+                trace_params.save_context = true;
 
                 let mut tracer = rewind_bochs::BochsTracer::new(&snapshot);
 
@@ -627,13 +632,15 @@ fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>,
                 for path in entries {
                     if path.extension() == Some(std::ffi::OsStr::new("bin")) {
                         let trace = replay_file::<H>(&tx, &path, &mut tracer, &context, &trace_params, &fuzz_params)?;
-                        update_coverage(&workdir, &system, &mut store, path, &fuzz_params, trace, &mut collection, &mut hints, &tx)?;
+                        let modified_pages = tracer.restore_snapshot()?;
+                        update_coverage(&workdir, &system, &mut store, path, &fuzz_params, trace, modified_pages, &mut collection, &mut hints, &tx)?;
                     }
                 }
-
+                let path = workdir.join("snapshot");
+                snapshot.save(path)?;
+                 
                 tx.send(Message::TotalCoverage(collection.coverage.len()))?;
                 tx.send(Message::Log(format!("updating mutation hints: immediates {}, offsets {}", hints.immediates.len(), hints.offsets.len())))?;
-                // tx.send(Message::Log(format!("unique addresses {}, {} modules, {} functions", collection.coverage.len(), collection.modules.len(), collection.functions.len())))?;
                 let path = workdir.join("hints.json");
                 hints.save(&path)?;
                     
@@ -651,12 +658,13 @@ fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>,
                         match event {
                             watch::Event::Create { path, .. } => {
                                 let trace = replay_file::<H>(&tx, &path, &mut tracer, &context, &trace_params, &fuzz_params)?;
-                                update_coverage(&workdir, &system, &mut store, path, &fuzz_params, trace, &mut collection, &mut hints, &tx)?;
+                                let modified_pages = tracer.restore_snapshot()?;
+                                update_coverage(&workdir, &system, &mut store, path, &fuzz_params, trace, modified_pages, &mut collection, &mut hints, &tx)?;
                                 tx.send(Message::TotalCoverage(collection.coverage.len()))?;
                                 tx.send(Message::Log(format!("updating mutation hints: immediates {}, offsets {}", hints.immediates.len(), hints.offsets.len())))?;
-                                // tx.send(Message::Log(format!("unique addresses {}, {} modules, {} functions", collection.coverage.len(), collection.modules.len(), collection.functions.len())))?;
                                 let path = workdir.join("hints.json");
                                 hints.save(&path)?;
+                                snapshot.save(workdir.join("snapshot"))?;
                             }
                             watch::Event::Remove(_path) => {
 
@@ -696,14 +704,14 @@ pub enum Message {
 fn start_coverage_collector_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>, tx: flume::Sender<Message>) {
     thread::spawn( move || {
         let result = collect_coverage_thread::<H>(control_rx, tx.clone());
-        tx.send(Message::Log(format!("thread returned {:?}", result))).unwrap();
+        tx.send(Message::Log(format!("error: thread returned {:?}", result))).unwrap();
     });
 }
 
 fn start_instances_collector_thread(control_rx: flume::Receiver<Control>, tx: flume::Sender<Message>) {
     thread::spawn( move || {
         let result = collect_instances_thread(control_rx, tx.clone());
-        tx.send(Message::Log(format!("thread returned {:?}", result))).unwrap();
+        tx.send(Message::Log(format!("error: thread returned {:?}", result))).unwrap();
     });
  
 }
@@ -714,7 +722,6 @@ fn collect_instances_thread(control_rx: flume::Receiver<Control>, tx: flume::Sen
         match control {
             Control::Start((workdir, _store)) => {
                 loop {
-                    // tx.send(Message::Log("refreshing instances list".to_string()))?;
                     let path = workdir.join("instances");
                     let mut entries = std::fs::read_dir(&path)?
                         .map(|res| res.map(|e| e.path()))
@@ -770,24 +777,12 @@ pub fn display_tui<H: trace::Hook>(workdir: PathBuf, store: PathBuf) -> Result<(
 
     let mut terminal = Terminal::new(backend)?;
 
-    // let tick_rate = Duration::from_millis(50);
-
-    //polling thread
+    // polling thread
     thread::spawn(move || {
-        // let mut last_tick = Instant::now();
         loop {
-            // poll for tick rate duration, if no events, sent tick event.
-            // let timeout = tick_rate
-                // .checked_sub(last_tick.elapsed())
-                // .unwrap_or_else(|| Duration::from_secs(0));
-
             if let Event::Key(key) = event::read().unwrap() {
                 tx.send(Message::Input(key)).unwrap();
             }
-            // if last_tick.elapsed() >= tick_rate {
-                // tx.send(Message::Tick).unwrap();
-                // last_tick = Instant::now();
-            // }
         }
     });
 
@@ -844,23 +839,29 @@ pub fn display_tui<H: trace::Hook>(workdir: PathBuf, store: PathBuf) -> Result<(
 
 // FIXME: to rename => collect trace coverage, should return Coverage, should be in system
 /// Update collection with coverage from trace
-pub fn parse_trace(collection: &mut Collection, trace: &mut trace::Trace, system: &System, store: &mut PdbStore) -> Result<(), TuiError> {
-
+#[allow(clippy::if_same_then_else)]
+pub fn parse_trace<S: Snapshot + X64VirtualAddressSpace>(collection: &mut Collection, trace: &mut trace::Trace, system: &System<S>, store: &mut PdbStore) -> Result<(), TuiError> {
     for &address in trace.seen.difference(&collection.coverage) {
         if let Some(module) = system.get_module_by_address(address) {
             *collection.modules.entry(module.name.clone()).or_insert_with(|| {
 
                 // FIXME: need a fn in system.rs
+                // println!("download pe");
                 if let Ok(info) = system.get_file_information(module) {
                     if store.download_pe(&module.name, &info).is_ok() {
-
+                        // println!("download pe... ok");
+                    } else {
+                        // println!("error during download");
                     }
                 }
 
+                // println!("download pdb");
                 if let Ok(info) = system.get_debug_information(module) {
                     let (name, guid) = info.into();
                     if store.download_pdb(&name, &guid).is_ok() && store.load_pdb(module.base, &name, &guid).is_ok() {
-
+                        // println!("download pdb... ok");
+                    } else {
+                        // println!("error during download");
                     }
                 }
 

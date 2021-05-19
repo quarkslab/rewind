@@ -644,7 +644,7 @@ impl <'a, S: Snapshot + mem::X64VirtualAddressSpace> Tracer for WhvpTracer <'a, 
 
                 }
 
-                self.read_gva(cr3, vaddr, data)
+                Tracer::read_gva(self, cr3, vaddr, data)
 
             }
             a => a.map_err(|e| TracerError::UnknownError(e.to_string()))
@@ -791,6 +791,13 @@ mod test {
             Ok(())
         }
 
+        fn get_cr3(&self) -> u64 {
+            todo!()
+        }
+
+        fn get_module_list(&self) -> u64 {
+            todo!()
+        }
     }
 
     impl X64VirtualAddressSpace for TestSnapshot {

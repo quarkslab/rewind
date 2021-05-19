@@ -25,6 +25,7 @@ impl BasicStrategy {
 
     /// Constructor
     pub fn new(mutator: Mutator) -> Self {
+        // FIXME: to own or not the mutator, that's the question... 
         Self {
             mutator,
             coverage: BTreeSet::new(),
@@ -37,11 +38,8 @@ impl BasicStrategy {
 
 impl Strategy for BasicStrategy {
 
-    // FIXME: should have mutation hint too
+    // FIXME: better corpus rotation? 
     fn generate_new_input(&mut self, data: &mut [u8], corpus: &mut Corpus, _hint: &mut MutationHint) {
-        // self.mutator.accessed = rules.offsets.iter().map(|o| *o as usize).collect();
-        // self.mutator.immediate_values = rules.immediates.iter().map(|o| o.to_le_bytes().to_vec()).collect();
-
         if let Some((_hash, entry)) = corpus.rotate() {
             let data_len = data.len();
             data[..].copy_from_slice(&entry.data[..data_len]);
@@ -1029,6 +1027,7 @@ impl Mutator {
 
     // FIXME: probability to fuzz a field
     // FIXME: how many fields to mutate
+    // FIXME: handle fields count == 1
     /// Choose a random number of fields and mutate them 
     pub fn mutate(&mut self, data: &mut [u8]) {
         if self.fields.is_empty() {
@@ -1036,8 +1035,12 @@ impl Mutator {
         }
 
         let mut rng = thread_rng();
-
-        let fields_to_mutate = rng.gen_range(1..self.fields.len());
+        let number_of_fields = self.fields.len();
+        let fields_to_mutate = if number_of_fields == 1 {
+            1
+        } else {
+            rng.gen_range(1..number_of_fields)
+        };
         let fields = self.fields.choose_multiple(&mut rng, fields_to_mutate);
         for f in fields {
             f.mutate(data);

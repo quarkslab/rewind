@@ -177,10 +177,7 @@ impl From<WHV_RUN_VP_EXIT_CONTEXT> for ExitContext {
 
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Halt => ExitContext::X64Halt(vp),
 
-                _ => panic!(format!(
-                    "unknown ExitReason variant ({:X}) when constructing ExitContext",
-                    i.ExitReason
-                )),
+                _ => panic!("unknown ExitReason variant when constructing ExitContext"),
             }
         }
     }

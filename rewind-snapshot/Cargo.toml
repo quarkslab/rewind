@@ -11,7 +11,7 @@ log = "0.4.8"
 zerocopy = "0.3.0"
 thiserror = "1.0.23"
 rewind-core = { path = "../rewind-core" }
-
-[dev-dependencies]
 memmap = "0.7.0"
+serde_json = "1.0.51"
+serde = { version = "1.0.106", features = ["derive"] }
 

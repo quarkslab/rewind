@@ -374,7 +374,7 @@ impl <'a> Fuzzer <'a> {
                 let path = std::path::Path::new(&self.path)
                     .join("corpus")
                     .join(format!("{:x}.bin", hash));
-                // println!("discovered {} new address(es), adding file {:?} to corpus", new, path);
+                println!("discovered {} new address(es), adding file {:?} to corpus", new, path);
                 let mut file = std::fs::File::create(path)?;
                 file.write_all(&data)?;
 
@@ -385,7 +385,7 @@ impl <'a> Fuzzer <'a> {
                         let path = std::path::Path::new(&self.path)
                             .join("crashes")
                             .join(format!("{:x}.bin", hash));
-                        // println!("got abnormal exit {}, saving input to {:?}", trace.status, path);
+                        println!("got abnormal exit {}, saving input to {:?}", trace.status, path);
                         let mut file = std::fs::File::create(path)?;
                         file.write_all(&data)?;
 

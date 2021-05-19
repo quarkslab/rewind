@@ -1,4 +1,6 @@
 
+use std::time::Duration;
+
 pub use tui::widgets::{
     Axis, BarChart, Block, Borders, Chart, Dataset, Gauge, LineGauge, List, ListItem, ListState,
     Paragraph, Row, Cell, Sparkline, Table, Tabs, Wrap, TableState, BorderType,
@@ -264,6 +266,8 @@ pub struct CorpusFile {
     pub path: std::path::PathBuf,
     pub seen: u64,
     pub count: u64,
+    pub duration: Duration,
+    pub modified_pages: usize,
     // instructions count
     // time
 }
@@ -275,7 +279,9 @@ impl CorpusFile {
         Self {
             path: path.into(),
             seen: 0,
-            count: 0
+            count: 0,
+            duration: Duration::from_secs(0),
+            modified_pages: 0,
         }
     }
 }

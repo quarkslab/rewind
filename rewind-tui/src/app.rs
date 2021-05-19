@@ -26,8 +26,6 @@ impl App {
             crashes_widget: CrashesWidget::new(),
             logs_widget: LogsWidget::new(),
             active_widget: ActiveWidget::Instances,
-            // points: Vec::new(),
-            // ticks: 0,
         }
 
     }
@@ -36,12 +34,9 @@ impl App {
     }
 
     pub fn on_collect(&mut self, functions: HashMap<String, Function>) {
-        // self.stats_widget.coverage = collection.coverage.len() as u64;
-
         self.coverage_widget.functions.clear();
         self.coverage_widget.functions.extend(functions.values().cloned());
         self.coverage_widget.functions.sort();
-
     }
 
     pub fn on_corpus(&mut self, file: CorpusFile) {

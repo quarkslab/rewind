@@ -1,19 +1,19 @@
 
 //! Rewind CLI.
 
-use std::{convert::TryInto, fmt::Write as FmtWrite, num::ParseIntError, path::PathBuf};
+use std::{collections::BTreeMap, convert::TryInto, fmt::Write as FmtWrite, num::ParseIntError, path::PathBuf};
 use std::io::{BufWriter, Read, Write};
 use std::time::Instant;
 
 use color_eyre::{Report, eyre::{bail, Result, WrapErr}};
 
-use clap::{Clap, crate_version};
+use clap::Clap;
 
 use memmap::MmapOptions;
 
-use rewind_core::{fuzz, corpus, mem::{X64VirtualAddressSpace, VirtMemError}, snapshot, mutation, trace::{self, Tracer, TracerError, Hook}};
+use rewind_core::{corpus, fuzz, mem::{X64VirtualAddressSpace, VirtMemError}, mutation, snapshot, trace::{self, Tracer, TracerError, Hook}};
 
-use rewind_snapshot::DumpSnapshot;
+use rewind_snapshot::{SnapshotKind, DumpSnapshot, FileSnapshot};
 
 use rewind_system::{System, PdbStore};
 
@@ -118,6 +118,8 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
     }
 }
 
+
+
 impl<'a, S> X64VirtualAddressSpace for Backend<'a, S>
 where S: snapshot::Snapshot + X64VirtualAddressSpace {
 
@@ -138,6 +140,20 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
     }
 }
 
+// fn load_snapshot<'a>(path: &Path) -> Result<Snapshot<'a>> {
+//     if path.join("mem.dmp").exists() {
+//         let dump_path = path.join("mem.dmp");
+
+//         let fp = std::fs::File::open(&dump_path).wrap_err(format!("Can't load snapshot {}", dump_path.display()))?;
+//         let buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+//         let snapshot = DumpSnapshot::new(&buffer)?;
+//         Ok(Snapshot::DumpSnapshot(snapshot))
+//     } else {
+//         let snapshot = FileSnapshot::new(path)?;
+//         Ok(Snapshot::FileSnapshot(snapshot))
+//     }
+// }
 
 /// Allow to customize CLI
 pub trait Rewind {
@@ -167,12 +183,23 @@ pub trait Rewind {
         let progress = progress.enter("Running tracer");
 
         progress.single("loading snapshot");
-        let dump_path = args.snapshot.join("mem.dmp");
 
-        let fp = std::fs::File::open(&dump_path)?;
-        let buffer = unsafe { MmapOptions::new().map(&fp)? };
+        // FIXME: finish load_snapshot
+        // let snapshot = load_snapshot(&args.snapshot)?;
+        let buffer;
 
-        let snapshot = DumpSnapshot::new(&buffer)?;
+        let snapshot = if args.snapshot.join("mem.dmp").exists() {
+            let dump_path = args.snapshot.join("mem.dmp");
+
+            let fp = std::fs::File::open(&dump_path).wrap_err(format!("Can't load snapshot {}", dump_path.display()))?;
+            buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+            let snapshot = DumpSnapshot::new(&buffer)?;
+            SnapshotKind::DumpSnapshot(snapshot)
+        } else {
+            let snapshot = FileSnapshot::new(&args.snapshot)?;
+            SnapshotKind::FileSnapshot(snapshot)
+        };
 
         let context_path = args.snapshot.join("context.json");
         let context = trace::ProcessorState::load(&context_path)?;
@@ -287,6 +314,11 @@ pub trait Rewind {
             trace.save(&path)?;
         }
 
+        if let Some(path) = &args.save_mem {
+            progress.single(format!("saving fetched physical pages to {}", path.display()));
+            snapshot.save(&path)?;
+        }
+
         Ok(())
     }
 
@@ -296,20 +328,29 @@ pub trait Rewind {
         let progress = progress.enter("Inspecting trace");
 
         progress.single("loading snapshot");
-        let dump_path = args.snapshot.join("mem.dmp");
+        let buffer;
+
+        let snapshot = if args.snapshot.join("mem.dmp").exists() {
+            let dump_path = args.snapshot.join("mem.dmp");
+
+            let fp = std::fs::File::open(&dump_path).wrap_err(format!("Can't load snapshot {}", dump_path.display()))?;
+            buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+            let snapshot = DumpSnapshot::new(&buffer)?;
+            SnapshotKind::DumpSnapshot(snapshot)
+        } else {
+            let snapshot = FileSnapshot::new(&args.snapshot)?;
+            SnapshotKind::FileSnapshot(snapshot)
+        };
 
         let context_path = args.snapshot.join("context.json");
         let context = trace::ProcessorState::load(&context_path)?;
  
-        let fp = std::fs::File::open(&dump_path)?;
-        let buffer = unsafe { MmapOptions::new().map(&fp)? };
-
-        let snapshot = DumpSnapshot::new(&buffer)?;
-
         progress.single("loading trace");
         let mut trace = trace::Trace::load(&args.trace)?;
 
-        progress.single(format!("trace contains {} instructions", trace.coverage.len()));
+        // FIXME: check if context is present
+        progress.single(format!("trace contains {} instructions ({} unique(s))", trace.coverage.len(), trace.seen.len()));
 
         let path = &args.store;
         if !path.exists() {
@@ -338,7 +379,7 @@ pub trait Rewind {
 
         progress.single(format!("trace has {} modules(s) and {} function(s)", collection.modules.len(), collection.functions.len()));
 
-        let mut out_writer = match &args.out {
+        let mut out_writer = match &args.symbolize {
             Some(x) => {
                 Box::new(BufWriter::new(std::fs::File::create(x)?)) as Box<dyn Write>
             }
@@ -353,7 +394,7 @@ pub trait Rewind {
 
             for (name, instructions) in functions.iter() {
                 // FIXME: compute percentage
-                println!("{}: {} instructions", &name, instructions.coverage);
+                writeln!(out_writer, "{}: {} instructions", &name, instructions.coverage)?;
 
             }
         }
@@ -416,7 +457,70 @@ pub trait Rewind {
                 }
 
             }
+        }
 
+        if args.sanitize {
+            // FIXME: can't work for now
+            // need to find a way to have return address for ExAllocatePool to be able to have buffer address
+            // mem accesses don't record read or written values
+            let allocate = store.resolve_name("ExAllocatePoolWithTag").unwrap();
+            println!("allocate @ {:x}", allocate);
+            let free = store.resolve_name("ExFreePoolWithTag").unwrap();
+            println!("free @ {:x}", free);
+
+            let _accesses: BTreeMap<u64, (u64, usize, String)> = trace.mem_access.iter().map(|(rip, vaddr, _c, size, access)| {
+                (*vaddr, (*rip, *size, access.clone()))
+            }).collect();
+
+            let instructions = trace.coverage.iter()
+                .enumerate();
+
+            let mut values = vec![];
+            for (index, (addr, maybe_context)) in instructions {
+                if *addr == allocate {
+                    
+                    println!("allocate called ({}, {:x})", index, addr);
+                    if let Some(context) = maybe_context {
+                        println!("rcx: {:x}", context.rcx);
+                        println!("rdx: {:x}", context.rdx);
+                        println!("rsp: {:x}", context.rsp);
+                        for (rip, vaddr, _, size, access) in trace.mem_access.iter() {
+                            if *vaddr == context.rsp && *size == 8 && access == "Write" {
+                                println!("found rsp, rip {:x}", rip);
+                                values.push(*rip);
+                            } 
+                        }
+
+                    } else {
+                        println!("error: need a trace with context");
+                        break
+                    }
+                }
+                if *addr == free {
+                    println!("free called ({}, {:x})", index, addr);
+                    if let Some(context) = maybe_context {
+                        println!("rcx: {:x}", context.rcx);
+                    } else {
+                        println!("error: need a trace with context");
+                        break
+                    }
+                }
+
+                if values.contains(addr) {
+                    println!("values match");
+                    if let Some(context) = maybe_context {
+                        println!("rax: {:x}", context.rax);
+                    } else {
+                        println!("error: need a trace with context");
+                        break
+                    }
+                }
+            }
+        }
+
+        if let Some(path) = &args.save_mem {
+            progress.single(format!("saving fetched physical pages to {}", path.display()));
+            snapshot.save(&path)?;
         }
 
         Ok(())
@@ -467,12 +571,20 @@ pub trait Rewind {
         let snapshot_path = &args.snapshot;
 
         progress.single("checking snapshot");
-        let dump_path = snapshot_path.join("mem.dmp");
+        let buffer;
 
-        let fp = std::fs::File::open(&dump_path).wrap_err_with(|| "can't open snapshot")?;
-        let buffer = unsafe { MmapOptions::new().map(&fp)? };
+        let _snapshot = if snapshot_path.join("mem.dmp").exists() {
+            let dump_path = snapshot_path.join("mem.dmp");
 
-        let _snapshot = DumpSnapshot::new(&buffer)?;
+            let fp = std::fs::File::open(&dump_path).wrap_err(format!("Can't load snapshot {}", dump_path.display()))?;
+            buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+            let snapshot = DumpSnapshot::new(&buffer)?;
+            SnapshotKind::DumpSnapshot(snapshot)
+        } else {
+            let snapshot = FileSnapshot::new(&args.snapshot)?;
+            SnapshotKind::FileSnapshot(snapshot)
+        };
 
         let context_path = snapshot_path.join("context.json");
         let _context = trace::ProcessorState::load(&context_path)?;
@@ -522,12 +634,20 @@ pub trait Rewind {
         let snapshot_path = &fuzz_params.snapshot_path;
 
         progress.single("Loading snapshot");
-        let dump_path = snapshot_path.join("mem.dmp");
+        let buffer;
 
-        let fp = std::fs::File::open(&dump_path)?;
-        let buffer = unsafe { MmapOptions::new().map(&fp)? };
+        let snapshot = if snapshot_path.join("mem.dmp").exists() {
+            let dump_path = snapshot_path.join("mem.dmp");
 
-        let snapshot = DumpSnapshot::new(&buffer)?;
+            let fp = std::fs::File::open(&dump_path).wrap_err(format!("Can't load snapshot {}", dump_path.display()))?;
+            buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+            let snapshot = DumpSnapshot::new(&buffer)?;
+            SnapshotKind::DumpSnapshot(snapshot)
+        } else {
+            let snapshot = FileSnapshot::new(&snapshot_path)?;
+            SnapshotKind::FileSnapshot(snapshot)
+        };
 
         let context_path = snapshot_path.join("context.json");
         let context = trace::ProcessorState::load(&context_path)?;
@@ -559,35 +679,33 @@ pub trait Rewind {
 
         // FIXME: handle properly ctrlc
 
-        if args.verbose > 0 {
-            let progress_bar = indicatif::ProgressBar::new_spinner();
-            progress_bar.enable_steady_tick(250);
-            progress_bar.set_style(indicatif::ProgressStyle::default_spinner().template("{spinner} {elapsed} {msg}"));
+        let progress_bar = indicatif::ProgressBar::new_spinner();
+        progress_bar.enable_steady_tick(250);
+        progress_bar.set_style(indicatif::ProgressStyle::default_spinner().template("{spinner} {elapsed} {msg}"));
 
-            let mut last_updated = std::time::Instant::now();
+        let mut last_updated = std::time::Instant::now();
 
-            fuzzer.callback( move |stats| {
-                if last_updated.elapsed() > std::time::Duration::from_millis(1000) {
-                    let elapsed = chrono::Utc::now() - stats.start;
-                    let num_seconds = std::cmp::max(1, elapsed.num_seconds());
-    
-                    let message = format!("{} iterations, {} exec/s, coverage {}, mapped pages {} ({}), corpus {}, crashes {}",
-                        stats.iterations,
-                        stats.iterations / num_seconds as u64,
-                        stats.coverage,
-                        stats.mapped_pages,
-                        indicatif::HumanBytes((stats.mapped_pages * 0x1000) as u64),
-                        stats.corpus_size,
-                        stats.crashes);
+        fuzzer.callback( move |stats| {
+            if last_updated.elapsed() > std::time::Duration::from_millis(1000) {
+                let elapsed = chrono::Utc::now() - stats.start;
+                let num_seconds = std::cmp::max(1, elapsed.num_seconds());
 
-                    progress_bar.set_message(&message);
-                    last_updated = std::time::Instant::now();
-                }
-                if stats.done {
-                    progress_bar.finish_and_clear();
-                }
-            });
-        }
+                let message = format!("{} iterations, {} exec/s, coverage {}, mapped pages {} ({}), corpus {}, crashes {}",
+                    stats.iterations,
+                    stats.iterations / num_seconds as u64,
+                    stats.coverage,
+                    stats.mapped_pages,
+                    indicatif::HumanBytes((stats.mapped_pages * 0x1000) as u64),
+                    stats.corpus_size,
+                    stats.crashes);
+
+                progress_bar.set_message(&message);
+                last_updated = std::time::Instant::now();
+            }
+            if stats.done {
+                progress_bar.finish_and_clear();
+            }
+        });
 
         let stats = fuzzer.run(&mut corpus, &mut strategy, &fuzz_params, &mut tracer, &context, &trace_params, &mut hook)?;
 
@@ -629,9 +747,10 @@ pub trait Rewind {
 }
 
 
-
+/// Rewind
+///
+/// PoC for a snapshot-based coverage-guided fuzzer targeting Windows kernel components.
 #[derive(Clap, Debug)]
-#[clap(name="rewind", version=crate_version!(), author="Damien Aumaitre")]
 struct RewindArgs {
     #[clap(subcommand)]
     subcmd: SubCommand,
@@ -645,6 +764,7 @@ enum SubCommand {
 }
 
 #[derive(Clap, Debug)]
+/// Do stuff with traces.
 struct Trace {
     #[clap(subcommand)]
     subcmd: TraceSubCommand
@@ -664,7 +784,6 @@ fn parse_hex(input: &str) -> Result<usize, ParseIntError> {
 
 /// Run tracer
 #[derive(Clap, Debug)]
-#[clap(name="rewind", about="Rewind", author="Damien Aumaitre")]
 pub struct TracerRun {
     /// Set the level of verbosity
     #[clap(long, short, parse(from_occurrences))]
@@ -714,6 +833,11 @@ pub struct TracerRun {
     #[clap(long="save-input", parse(from_os_str))]
     pub save_input: Option<std::path::PathBuf>,
 
+    /// Save physical pages fetched from snapshot (debug)
+    #[clap(long="save-mem", parse(from_os_str))]
+    pub save_mem: Option<std::path::PathBuf>,
+
+
 }
 
 /// Inspect trace
@@ -760,13 +884,20 @@ pub struct TracerInspect {
     pub filter: Option<String>,
 
     /// Save formatted trace to file
-    #[clap(long="out")]
-    pub out: Option<PathBuf>,
+    #[clap(long="symbolize")]
+    pub symbolize: Option<PathBuf>,
 
+    /// Apply dummy sanitizer (experimental)
+    #[clap(long="sanitize")]
+    pub sanitize: bool,
+
+    /// Save physical pages fetched from snapshot (debug)
+    #[clap(long="save-mem", parse(from_os_str))]
+    pub save_mem: Option<std::path::PathBuf>,
 
 }
 
-/// Trace info
+/// Get basic info on a trace
 #[derive(Clap, Debug)]
 pub struct TracerInfo {
     /// Snapshot path
@@ -782,6 +913,7 @@ pub struct TracerInfo {
     pub verbose: usize,
 }
  
+/// Fuzz all the things
 #[derive(Clap, Debug)]
 struct Fuzz {
     #[clap(subcommand)]
@@ -797,7 +929,7 @@ enum FuzzerSubCommand {
 
 }
 
-/// Fuzzer init
+/// Initialize fuzzer
 #[derive(Clap, Debug)]
 pub struct FuzzerInit {
     /// Path to snapshot
@@ -818,7 +950,7 @@ pub struct FuzzerInit {
 
 }
 
-/// Fuzzer run
+/// Run a fuzzer instance
 #[derive(Clap, Debug)]
 pub struct FuzzerRun {
     /// Set the level of verbosity
@@ -855,7 +987,7 @@ pub struct FuzzerRun {
 
 }
 
-/// Fuzzer monitor
+/// Launch monitor TUI
 #[derive(Clap, Debug)]
 pub struct FuzzerMonitor {
     /// Set the level of verbosity

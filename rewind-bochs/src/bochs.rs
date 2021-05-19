@@ -227,6 +227,8 @@ impl <S: Snapshot> hook::Hooks for BochsHooks <'_, S> {
 
         // FIXME: push type
         // FIXME: need to push rip
+        // FIXME: need to read value, lin access occurs after exec, so need to find read or written value...
+        // FIXME: need to show proper rip too
         if let Some(trace) = self.trace.as_mut() {
             let access = format!("{:?}", rw);
             trace.mem_access.push((rip, vaddr, gpa, len, access));
@@ -265,7 +267,7 @@ impl <S: Snapshot> hook::Hooks for BochsHooks <'_, S> {
                 unsafe { guest_mem::page_insert(base, pages as *mut u8) };
             },
             _ => {
-                println!("can't find page in dump");
+                println!("can't find page {:x} in dump", base);
                 let cpu = Cpu::from(0);
                 unsafe { cpu.set_run_state(RunState::Stop) };
             }
@@ -534,11 +536,10 @@ impl <'a, S: Snapshot> Tracer for BochsTracer <'a, S> {
 
         hook.setup(self);
 
-        let run = unsafe { c.prepare().register(&mut self.hooks) };
         loop {
 
             self.hooks.breakpoints.extend(self.breakpoints.iter());
-            unsafe { run.run() }; 
+            unsafe { c.prepare().register(&mut self.hooks).run() };
 
             match self.hooks.trace.as_ref().unwrap().status {
                 EmulationStatus::Breakpoint => {
@@ -710,6 +711,13 @@ mod test {
             Ok(())
         }
 
+        fn get_cr3(&self) -> u64 {
+            todo!()
+        }
+
+        fn get_module_list(&self) -> u64 {
+            todo!()
+        }
     }
 
     impl X64VirtualAddressSpace for TestSnapshot {

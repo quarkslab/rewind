@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use deku::prelude::*;
 
-use rewind_core::mem::X64VirtualAddressSpace;
+use rewind_core::{mem::X64VirtualAddressSpace, snapshot::Snapshot};
 
 use crate::pe;
 
@@ -32,21 +32,21 @@ pub enum SystemError {
 }
 
 /// Operating system
-pub struct System <'a> {
+pub struct System <'a, S> {
 
     /// Snapshot
-    pub snapshot: &'a rewind_snapshot::DumpSnapshot<'a>,
+    pub snapshot: &'a S,
 
     /// Loaded modules
     pub modules: Vec<LoadedModule>,
 
 }
 
-impl <'a> System <'a>
+impl <'a, S> System <'a, S>
+where S: Snapshot + X64VirtualAddressSpace
 {
     /// Constructor
-    pub fn new(snapshot: &'a rewind_snapshot::DumpSnapshot<'a>) -> Result<Self, SystemError>
-    {
+    pub fn new(snapshot: &'a S) -> Result<Self, SystemError> {
         let system = Self {
             snapshot,
             modules: Vec::new(),
@@ -68,7 +68,7 @@ impl <'a> System <'a>
         // println!("cr3 is {:x}", cr3);
 
         let module_list = self.snapshot.get_module_list();
-        // println!("module list is {:x}", module_list);
+        // println!("module list head: {:x}", module_list);
 
         let size = std::mem::size_of::<LdrDataTableEntry>();
 
