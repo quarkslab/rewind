@@ -482,6 +482,11 @@ impl GpaManager {
         }
     }
 
+    /// Check if page is in cache
+    pub fn is_gpa_present(&self, gpa: Gpa) -> bool {
+        self.pages.contains_key(&gpa)
+    }
+
     /// Add a page to cache
     pub fn add_page(&mut self, gpa: Gpa, page: [u8; 4096]) {
         let (base, _) = page_off(gpa);

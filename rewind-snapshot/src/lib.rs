@@ -6,7 +6,7 @@
 //! Support full kernel dump and bitmap kernel dump
 
 
-use std::io::{Read, Write, BufWriter};
+use std::{cell::RefCell, io::{Read, Write, BufWriter}};
 
 use serde::{Serialize, Deserialize};
 
@@ -145,6 +145,7 @@ impl SnapshotContext {
 pub struct FileSnapshot {
     path: std::path::PathBuf,
     context: SnapshotContext,
+    cache: RefCell<mem::GpaManager>,
 }
 
 impl FileSnapshot {
@@ -162,9 +163,11 @@ impl FileSnapshot {
         let context = SnapshotContext::load(path.join("snapshot.json"))
             .map_err(|e| { SnapshotError::GenericError(e.to_string()) })?;
 
+        let cache = RefCell::new(mem::GpaManager::new());
         Ok(Self {
             context,
             path,
+            cache,
         })
     }
 
@@ -186,13 +189,23 @@ impl Snapshot for FileSnapshot {
         let base = gpa & !0xfff;
         let offset = (gpa & 0xfff) as usize;
 
-        let mut data = vec![0u8; 0x1000];
+        let mut data = [0u8; 0x1000];
+        let page_in_cache = self.cache.borrow().is_gpa_present(base);
+        if page_in_cache {
+            self.cache.borrow().read_gpa(base, &mut data)
+                .map_err(|e| SnapshotError::GenericError(e.to_string()))?;
+            buffer.copy_from_slice(&data[offset..offset+buffer.len()]);
+            return Ok(())
+        }
 
+        println!("can't find {:x} (offset {:x}) in cache, read from disk", base, offset);
         let filename = format!("{:016x}.bin", base);
         let path = self.path.join("mem").join(filename);
         let mut fp = std::fs::File::open(path)?;
         fp.read_exact(&mut data)?;
         buffer.copy_from_slice(&data[offset..offset+buffer.len()]);
+        self.cache.borrow_mut().add_page(base, data);
+
         Ok(())
     }
 

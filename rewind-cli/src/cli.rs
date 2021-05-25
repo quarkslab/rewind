@@ -723,11 +723,57 @@ pub trait Rewind {
         Ok(())
     }
 
+    /// Implementation of `rewind snapshot extract`
+    fn handle_snapshot_extract(&self, args: &SnapshotExtract) -> Result<()> {
+        let progress = helpers::start();
+        let progress = progress.enter("Extracting pages from snapshot");
+
+        let snapshot_path = &args.snapshot;
+
+        progress.single("Loading snapshot");
+        let buffer;
+
+        let snapshot = if snapshot_path.join("mem.dmp").exists() {
+            let dump_path = snapshot_path.join("mem.dmp");
+
+            let fp = std::fs::File::open(&dump_path).wrap_err(format!("Can't load snapshot {}", dump_path.display()))?;
+            buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+            let snapshot = DumpSnapshot::new(&buffer)?;
+            SnapshotKind::DumpSnapshot(snapshot)
+        } else {
+            let snapshot = FileSnapshot::new(&snapshot_path)?;
+            SnapshotKind::FileSnapshot(snapshot)
+        };
+
+        progress.single("Extracting pages");
+        for address in &args.addresses {
+            let gpa = *address as u64;
+            let base = gpa & !0xfff;
+            let filename = format!("{:016x}.bin", base);
+            let path = &args.path.join(filename);
+
+            println!("Copying {:x} to {}", address, path.display());
+            let mut data = vec![0u8; 0x1000];
+            rewind_core::snapshot::Snapshot::read_gpa(&snapshot, gpa, &mut data)?;
+
+            let mut fp = std::fs::File::create(path)?;
+            fp.write_all(&data)?;
+        }
+
+        Ok(())
+    }
+
     /// Command dispatcher
     fn run(&self) -> Result<()>
     {
         let args = RewindArgs::parse();
         match &args.subcmd {
+            SubCommand::Snapshot(t) => {
+                match &t.subcmd {
+                    SnapshotSubCommand::Extract(t) => self.handle_snapshot_extract(t),
+                }
+            }
             SubCommand::Trace(t) => {
                 match &t.subcmd {
                     TraceSubCommand::Run(t) => self.handle_trace_run(t),
@@ -759,8 +805,38 @@ struct RewindArgs {
 
 #[derive(Clap, Debug)]
 enum SubCommand {
+    Snapshot(Snapshot),
     Trace(Trace),
     Fuzz(Fuzz)
+}
+
+#[derive(Clap, Debug)]
+/// Manage snapshots.
+struct Snapshot {
+    #[clap(subcommand)]
+    subcmd: SnapshotSubCommand
+}
+
+#[derive(Clap, Debug)]
+enum SnapshotSubCommand {
+    Extract(SnapshotExtract),
+}
+
+/// Extract physical pages from snapshot
+#[derive(Clap, Debug)]
+pub struct SnapshotExtract {
+    /// Snapshot path
+    #[clap(parse(from_os_str))]
+    pub snapshot: std::path::PathBuf,
+
+    /// Output directory
+    #[clap(parse(from_os_str))]
+    pub path: std::path::PathBuf,
+
+    /// Physical pages to extract (in hexadecimal)
+    #[clap(multiple(true), number_of_values(1), parse(try_from_str=parse_hex_vec))]
+    pub addresses: Vec<usize>,
+
 }
 
 #[derive(Clap, Debug)]
@@ -779,6 +855,10 @@ enum TraceSubCommand {
 }
 
 fn parse_hex(input: &str) -> Result<usize, ParseIntError> {
+    usize::from_str_radix(input, 16)
+}
+
+fn parse_hex_vec(input: &str) -> Result<usize, ParseIntError> {
     usize::from_str_radix(input, 16)
 }
 
