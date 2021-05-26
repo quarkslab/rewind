@@ -375,7 +375,7 @@ pub struct Trace {
     /// Unique addresses discovered
     pub seen: BTreeSet<u64>,
     /// Memory accesses
-    pub mem_access: Vec<(u64, u64, u64, usize, String)>,
+    pub mem_accesses: Vec<MemAccess>,
 }
 
 impl Trace {
@@ -389,7 +389,7 @@ impl Trace {
             immediates: BTreeSet::new(),
             seen: BTreeSet::new(),
             status: EmulationStatus::Success,
-            mem_access: Vec::new(),
+            mem_accesses: Vec::new(),
         }
     }
 
@@ -577,4 +577,31 @@ impl Hook for NoHook {
     fn patch_page(&self, _gva: u64) -> bool {
         true
     }
+}
+
+
+/// Memory access
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MemAccess {
+    /// rip
+    pub rip: u64,
+    /// vaddr
+    pub vaddr: u64,
+    /// size
+    pub size: usize,
+    /// access_type
+    pub access_type: MemAccessType,
+}
+
+/// Type of memory access
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum MemAccessType {
+    /// Read
+    Read,
+    /// Write
+    Write,
+    /// Execute
+    Execute,
+    /// RW
+    RW
 }

@@ -42,7 +42,7 @@ impl <'a> RawDmp <'a> {
         let mut physmem = BTreeMap::new();
         if header_ext.dump_type == 1 {
             // full dump
-            let buffer = &run_base[..];
+            let buffer = run_base;
             let (physical_memory_block_buffer, _bytes) = LayoutVerified::<_, PhysicalMemoryBlockBuffer>::new_from_prefix(buffer).ok_or_else(|| ParserError::ParseError("can't read physical memory block buffer".into()))?;
 
             let mut base = 0x2000;

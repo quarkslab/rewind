@@ -1,7 +1,7 @@
 
 //! Rewind CLI.
 
-use std::{collections::BTreeMap, convert::TryInto, fmt::Write as FmtWrite, num::ParseIntError, path::PathBuf};
+use std::{convert::TryInto, fmt::Write as FmtWrite, num::ParseIntError, path::PathBuf};
 use std::io::{BufWriter, Read, Write};
 use std::time::Instant;
 
@@ -460,6 +460,7 @@ pub trait Rewind {
         }
 
         if args.sanitize {
+            println!("DO NOT USE: half baked attempt, doesn't work");
             // FIXME: can't work for now
             // need to find a way to have return address for ExAllocatePool to be able to have buffer address
             // mem accesses don't record read or written values
@@ -467,10 +468,6 @@ pub trait Rewind {
             println!("allocate @ {:x}", allocate);
             let free = store.resolve_name("ExFreePoolWithTag").unwrap();
             println!("free @ {:x}", free);
-
-            let _accesses: BTreeMap<u64, (u64, usize, String)> = trace.mem_access.iter().map(|(rip, vaddr, _c, size, access)| {
-                (*vaddr, (*rip, *size, access.clone()))
-            }).collect();
 
             let instructions = trace.coverage.iter()
                 .enumerate();
@@ -484,10 +481,10 @@ pub trait Rewind {
                         println!("rcx: {:x}", context.rcx);
                         println!("rdx: {:x}", context.rdx);
                         println!("rsp: {:x}", context.rsp);
-                        for (rip, vaddr, _, size, access) in trace.mem_access.iter() {
-                            if *vaddr == context.rsp && *size == 8 && access == "Write" {
-                                println!("found rsp, rip {:x}", rip);
-                                values.push(*rip);
+                        for access in trace.mem_accesses.iter() {
+                            if access.vaddr == context.rsp && access.size == 8 && access.access_type == trace::MemAccessType::Write {
+                                println!("found rsp, rip {:x}", access.rip);
+                                values.push(access.rip);
                             } 
                         }
 
@@ -622,7 +619,7 @@ pub trait Rewind {
         fuzz_params.max_iterations = args.max_iterations;
         fuzz_params.stop_on_crash = args.stop_on_crash;
 
-        let desc = mutation::StructDesc::load(&args.description)?;
+        let desc = mutation::StructDesc::load(&args.mutation)?;
 
         let mutator: mutation::Mutator = desc.try_into()?;
         // FIXME: strategy should be check from param
@@ -834,7 +831,7 @@ pub struct SnapshotExtract {
     pub path: std::path::PathBuf,
 
     /// Physical pages to extract (in hexadecimal)
-    #[clap(multiple(true), number_of_values(1), parse(try_from_str=parse_hex_vec))]
+    #[clap(multiple(true), number_of_values(1), parse(try_from_str=parse_hex))]
     pub addresses: Vec<usize>,
 
 }
@@ -855,10 +852,6 @@ enum TraceSubCommand {
 }
 
 fn parse_hex(input: &str) -> Result<usize, ParseIntError> {
-    usize::from_str_radix(input, 16)
-}
-
-fn parse_hex_vec(input: &str) -> Result<usize, ParseIntError> {
     usize::from_str_radix(input, 16)
 }
 
@@ -1012,13 +1005,13 @@ enum FuzzerSubCommand {
 /// Initialize fuzzer
 #[derive(Clap, Debug)]
 pub struct FuzzerInit {
-    /// Path to snapshot
-    #[clap(long="snapshot", parse(from_os_str))]
-    pub snapshot: std::path::PathBuf,
-
     /// Fuzzer work directory
     #[clap(parse(from_os_str))]
     pub workdir: std::path::PathBuf,
+
+    /// Path to snapshot
+    #[clap(parse(from_os_str))]
+    pub snapshot: std::path::PathBuf,
 
     /// Input address
     #[clap(long="input-address")]
@@ -1061,9 +1054,9 @@ pub struct FuzzerRun {
     #[clap(parse(from_os_str))]
     pub workdir: std::path::PathBuf,
 
-    /// Input description
-    #[clap(long="description", parse(from_os_str))]
-    pub description: std::path::PathBuf,
+    /// Mutations to apply
+    #[clap(long="mutation", parse(from_os_str))]
+    pub mutation: std::path::PathBuf,
 
 }
 

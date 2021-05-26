@@ -869,7 +869,7 @@ mod test {
         assert_eq!(trace.seen.len(), 2912);
         assert_eq!(trace.coverage.len(), 59120);
         assert_eq!(trace.immediates.len(), 0);
-        assert_eq!(trace.mem_access.len(), 0);
+        assert_eq!(trace.mem_accesses.len(), 0);
 
         assert_eq!(trace.coverage[0].0, context.rip);
 

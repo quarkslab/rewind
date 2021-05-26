@@ -230,8 +230,22 @@ impl <S: Snapshot> hook::Hooks for BochsHooks <'_, S> {
         // FIXME: need to read value, lin access occurs after exec, so need to find read or written value...
         // FIXME: need to show proper rip too
         if let Some(trace) = self.trace.as_mut() {
-            let access = format!("{:?}", rw);
-            trace.mem_access.push((rip, vaddr, gpa, len, access));
+            let access_type = match rw {
+                
+                hook::MemAccess::Read => trace::MemAccessType::Read,
+                hook::MemAccess::Write => trace::MemAccessType::Write,
+                hook::MemAccess::Execute => trace::MemAccessType::Execute,
+                hook::MemAccess::RW => trace::MemAccessType::RW,
+            };
+
+            let access = trace::MemAccess {
+                rip,
+                vaddr,
+                size: len,
+                access_type
+            };
+
+            trace.mem_accesses.push(access);
             match rw {
                 hook::MemAccess::Write | hook::MemAccess::RW => {
                     self.dirty.insert(gpa & !0xfff);
@@ -784,7 +798,7 @@ mod test {
         assert_eq!(trace.seen.len(), 2913);
         assert_eq!(trace.coverage.len(), 59120);
         assert_eq!(trace.immediates.len(), 22);
-        assert_eq!(trace.mem_access.len(), 16650);
+        assert_eq!(trace.mem_accesses.len(), 16650);
 
         assert_eq!(trace.status, trace::EmulationStatus::Success);
 

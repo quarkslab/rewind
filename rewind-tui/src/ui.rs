@@ -1,4 +1,4 @@
-use std::{io::{Read, Write}, path::PathBuf, time::Duration};
+use std::{io::{Read, Write}, path::{Path, PathBuf}, time::Duration};
 use std::collections::{HashMap, BTreeSet};
 use std::thread;
 use std::sync::mpsc;
@@ -515,7 +515,7 @@ fn replay_file<H: trace::Hook>(tx: &flume::Sender<Message>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_coverage<S: Snapshot + X64VirtualAddressSpace>(workdir: &PathBuf, system: &System<S>, store: &mut PdbStore, corpus_path: PathBuf, fuzz_params: &fuzz::Params, mut trace: trace::Trace, modified_pages: usize, collection: &mut Collection, hints: &mut mutation::MutationHint, tx: &flume::Sender<Message> ) -> Result<(), TuiError> {
+fn update_coverage<S: Snapshot + X64VirtualAddressSpace>(workdir: &Path, system: &System<S>, store: &mut PdbStore, corpus_path: PathBuf, fuzz_params: &fuzz::Params, mut trace: trace::Trace, modified_pages: usize, collection: &mut Collection, hints: &mut mutation::MutationHint, tx: &flume::Sender<Message> ) -> Result<(), TuiError> {
 
     let mut corpus_file = CorpusFile::new(corpus_path.file_name().unwrap());
     corpus_file.seen = trace.seen.len() as u64;
@@ -534,12 +534,12 @@ fn update_coverage<S: Snapshot + X64VirtualAddressSpace>(workdir: &PathBuf, syst
     hints.immediates.append(&mut trace.immediates);
     let address = fuzz_params.input;
     let size = fuzz_params.input_size;
-    let filtered = trace.mem_access.iter()
+    let filtered = trace.mem_accesses.iter()
         .filter(|a| {
-            a.1 >= address && a.1 < address + size
+            a.vaddr >= address && a.vaddr < address + size
         })
         .map(|a| {
-            a.1 - address
+            a.vaddr - address
         });
 
     hints.offsets.extend(filtered);

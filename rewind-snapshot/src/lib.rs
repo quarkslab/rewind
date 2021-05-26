@@ -164,11 +164,8 @@ impl FileSnapshot {
             .map_err(|e| { SnapshotError::GenericError(e.to_string()) })?;
 
         let cache = RefCell::new(mem::GpaManager::new());
-        Ok(Self {
-            context,
-            path,
-            cache,
-        })
+        let file_snapshot = Self { path, context, cache };
+        Ok(file_snapshot)
     }
 
     fn write_gpa(&self, gpa: u64, buffer: &[u8]) -> Result<(), SnapshotError> {
@@ -198,7 +195,6 @@ impl Snapshot for FileSnapshot {
             return Ok(())
         }
 
-        println!("can't find {:x} (offset {:x}) in cache, read from disk", base, offset);
         let filename = format!("{:016x}.bin", base);
         let path = self.path.join("mem").join(filename);
         let mut fp = std::fs::File::open(path)?;

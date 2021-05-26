@@ -890,9 +890,7 @@ impl Field for PWStr {
             .map(char::from)
             .collect();
 
-        use std::os::windows::ffi::OsStrExt;
-        use std::ffi::OsStr;
-        let text = OsStr::new(&rand_string).encode_wide().chain(Some(0).into_iter()).collect::<Vec<_>>();
+        let text: Vec::<u16> = rand_string.encode_utf16().collect();
         for (o, &b) in text.iter().enumerate() {
             let offset = self.value as usize + o * 2;
             let bytes = u16::to_le_bytes(b);
@@ -984,6 +982,7 @@ impl Field for Data {
 
 }
 
+#[allow(clippy::clippy::upper_case_acronyms)]
 #[derive(Debug, Deserialize, Serialize)]
 enum FieldType {
     U8,
