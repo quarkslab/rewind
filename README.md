@@ -3,6 +3,7 @@
 This tool is a PoC for a snapshot-based coverage-guided fuzzer targeting Windows kernel components.
 
 The idea is to start from a snapshot of a live running system. This snapshot is composed of the physical memory pages along with the state of the cpu.
+
 This state is used to setup the initial state of a virtual cpu of some backend. With on-demand paging only the pages needed for the execution of the target function are read from the snapshot.
 
 As a result we obtain a small virtual machine.
@@ -23,16 +24,15 @@ tedious. The cycle debug / crash / reboot / reset all breakpoints is slow and pa
 want to do some fuzzing, it often requires you to setup one or several virtual machines plus a
 kernel debugger and craft some ghetto scripts to handle crash detection...
 
-Doing snapshot with virtual machines helps but it's still slow as F...
+Doing snapshot with virtual machines helps but it's slow.
 
 During 2018 Microsoft introduced a new set of API named Windows Hypervisor Platform (WHVP). These
 API allow to setup a partition (VM in hyper-V lingua) with some virtual processors and to have a
 control on the VM exits occurring in the virtual machine. It's almost like having your own
-vm-exit handler in userland. Quite handy to do useful things, for example:
+VM-exit handler in userland. Quite handy to do useful things, for example:
 
 - https://github.com/ionescu007/Simpleator
 - https://github.com/gamozolabs/applepie
-
 
 So I started to play with WHVP and made a first PoC allowing me to execute
 in a Hyper-V partition some shellcode. It was written in Python and quite slow. This first PoC
@@ -52,11 +52,12 @@ The tool implements 2 possibilities to obtain the coverage. The first one levera
 It requires to modify the target and it's slow. I would have preferred to use [MONITOR](http://hypervsir.blogspot.com/2014/11/monitor-trap-flag-mtf-usage-in-ept.html) trap flag. But WHVP doesn't offer this possibility.
 
 In order to have proper performances (required for fuzzing), I decided to reduce the precision of the coverage and add a mode when you only know when an instruction is executed for the first time.
-To do that I patch the pages fetched from the snapshot with 0xcc bytes (only for executable pages). When the cpu will execute these patched instructions the hypervisor will trap the exception and rewrite the instructions with the original code.
-It's like having a unique software breakpoint set on every instruction. It works 95% of the time but in particular piece of code (ones with jump tables for example) it will fail because data will be replaced.
-To overcome this one option would be to disassemble the code before mapping it and only patch what is needed (maybe next time).
 
-FIXME: need an image to illustrate that (use cng vuln ?)
+To do that I patch the pages fetched from the snapshot with 0xcc bytes (only for executable pages). When the cpu will execute these patched instructions the hypervisor will trap the exception and rewrite the instructions with the original code.
+
+It's like having a unique software breakpoint set on every instruction. It works 95% of the time but in particular piece of code (ones with jump tables for example) it will fail because data will be replaced.
+
+To overcome this one option would be to disassemble the code before mapping it and only patch what is needed (maybe next time).
 
 During my experiment I encountered several limitations when using WHVP. It's slow, like really slow. [VirtualBox](https://www.virtualbox.org/browser/vbox/trunk/src/VBox/VMM/VMMR3/NEMR3Native-win.cpp) source code have some interesting comments :)
 
@@ -64,12 +65,12 @@ So to have proper performance you really need to limit VM exits and it's incompa
 
 During the same time I started to use [bochs](https://bochs.sourceforge.io/cgi-bin/lxr/source/instrument/instrumentation.txt) (specially the instrumentation part) to check if the traces obtained by the tool were correct. Bochs was some kind of oracle to see if I had divergent traces.
 
-Bochs is faster than WHVP when doing full trace and you also have the benefits of having memory accesses plus the possibility to easily extract some immediates values (really useful to guide a mutation engine).
+Bochs is faster than WHVP when doing full trace and you also have the benefits of having memory accesses plus other useful goodies.
 
 I decided to add bochs as another backend. ``whvp`` was not a proper name anymore and I settled on ``rewind``.
 
-- FIXME: explain the name
-- FIXME: show a TUI screenshot
+![](examples/CVE-2020-17087/images/rewind_monitor_cng.png)
+*Monitor interface*
 
 ## Prerequisites
 
@@ -97,7 +98,7 @@ $ git clone https://github.com/yrp604/bochscpu
 Download the prebuilt bochs artifacts from bochscpu-build (https://github.com/yrp604/bochscpu-build)
 
 ```
-$ curl.exe [verylongurlfromazurepipeline] --output bochs-x64-win.zip
+$ curl.exe [artifact_url] --output bochs-x64-win.zip
 ```
 
 Extract the ``lib`` and ``bochs`` folders into the bochscpu checkout.
@@ -124,6 +125,11 @@ State            : Enabled
 CustomProperties :
 ```
 
+If it is not enabled you can use `Set-WindowsOptionalFeature` cmdlet to enable. You'll also need to enable Hyper-V.
+
+You also need to have a Windows SDK (10.0.19041.0) installed. You can download it from https://developer.microsoft.com/fr-fr/windows/downloads/windows-10-sdk/.
+
+
 ### Build from master branch
 
 You need to install LLVM and set the `LIBCLANG_PATH` environment variable (required by `bindgen`)
@@ -136,57 +142,45 @@ $ $env:LIBCLANG_PATH="C:\Program Files\LLVM\bin"
 From there you should be able to build ``rewind`` (nightly required because of ``unwind_attributes`` in ``bochscpu`` crate):
 
 ```
-$ cargo +nightly build --release --all
+$ cd rewind_cli
+$ cargo +nightly build --release
 ```
 
 ``rewind`` binary will be available in the ``target/release`` directory.
 
+You could also use cargo to install locally:
+
+```
+$ cd rewind_cli
+$ cargo +nightly install --path .
+```
+
+### Common build issues
+
+-  if cmake is not in path, you will have an error when building zydis
+
+```
+> error: failed to run custom build command for `zydis v3.1.1`
+```
+
+- if Windows SDK is different of the supported ones, `whvp-sys` will fail to build
+
+
 ## Typical usage
 
-FIXME
+`rewind` was designed around my own workflow when I'm conducting security assessments for kernel drivers on Windows platform.
+
+The first step is to install the target software inside a virtual machine. Since I'im using a mix of static and dynamic analysis I will also setup a kernel debugger.
+
+After having opened some random drivers in IDA, I'll quickly begin to target some functions. To do that I usually put some breakpoints with `windbg` and combined with `ret-sync` (https://github.com/bootleg/ret-sync) I can start to play.
+
+That's where `rewind` comes into play. Instead of editing random buffer in memory and singlestep and annotate the IDB to have a rough idea of what's is going on. I'll take a snapshot with `windbg` and use `rewind` instead.
+
+It will ease the process a lot. Having a snapshot offers a lot of advantages. Everything is deterministic. You can replay ad nauseum a function call. You can launch a fuzzer if the target function looks interesting. You can even close the VM since it's not needed anymore.
 
 ## Examples
 
-A basic tutorial leveraging CVE-2020-17087 is provided in the [examples](/examples/) directory
-
-## Design
-
-FIXME
-
-## Snapshots
-
-To easily obtain a snapshot from windbg, a script leveraging `pykd` is provided.
-To use it you need to launch the `pykd_dump_context.py` script in your Windbg instance.
-
-```
-kd> !load pykd
-kd> !py -3 -g [path]\pykd_dump_context.py [directory]
-[go make a coffee, it can take a while]
-```
-
-The resulting snapshot consists of 3 files:
-
-- `context.json`: initial cpu state
-- `params.json`: tracer parameters (expected return address, excluded addresses)
-- `mem.dmp`: Windbg dump file
-
-## Tracer
-
-Its goal is to execute a target function in a Hyper-V partition and save an execution trace if needed.
-
-You have several possibilities for obtaining the coverage:
-
-- `no`: no coverage is used, the function is executed until the processor hits the expected return address
-- `hit`: when pages containing code are mapped in the Hyper-V partition, instructions are replaced with software breakpoints and will be restored when they are executed for the first time. As a result you'll have the coverage on unique addresses.
-- `instrs`: TF (Trap Flag) is enabled in `rflags` and each instruction will trigger an interruption from the virtual processor. As a result you'll have a full coverage of every instructions executed.
-
-The trace can be saved into a `json` file for further processing or analysis.
-You can choose to record only the encountered addresses or the full processor context.
-You can also replay a specific input (for example found by the fuzzer).
-
-## Fuzzer
-
-The purpose of this is to fuzz a target function by applying mutations on an input buffer.
+A basic tutorial leveraging CVE-2020-17087 is provided in the [examples](/examples/CVE-2020-17087) directory
 
 ## Roadmap
 
@@ -200,7 +194,7 @@ The purpose of this is to fuzz a target function by applying mutations on an inp
 - The target function will be executed with a unique virtual processor, you have no support for hardware so it's probable something will be wrong if you trace hardware related functions
 - This tool is best used for targetting specific functions
 - To have best performances, minimize VM exits and modified pages because they can be really costly and will increase the time needed to execute the function. 
-- Don't use hyper-V to do snapshots since enlightments are not handled
+- Don't use hyper-V to do snapshots. Windows Hyper-V are "enlightened" meaning they are using paravirtualization, it's currently not handled
 - Some symbols are not resolved properly
 
 ## License

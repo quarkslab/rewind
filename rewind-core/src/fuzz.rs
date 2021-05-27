@@ -368,6 +368,7 @@ impl <'a> Fuzzer <'a> {
 
             let new = strategy.check_new_coverage(&params, &mut trace);
 
+            // FIXME: should be in strategy
             if new > 0 {
                 // save corpus
                 let hash = calculate_hash(&data);

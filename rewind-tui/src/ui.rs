@@ -403,7 +403,8 @@ fn draw_crashes(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, ap
                       format!("{}", item.count),
                       format!("{}", item.seen),
                       format!("{:?}", item.duration),
-                      format!("{}", item.modified_pages)
+                      format!("{}", item.modified_pages),
+                      format!("{}", item.status),
                       ])
     });
 
@@ -426,18 +427,19 @@ fn draw_crashes(f: &mut Frame<CrosstermBackend<std::io::Stdout>>, area: Rect, ap
 
     let table = Table::new(rows)
         .header(
-            Row::new(vec!["File", "Instructions", "Unique", "Time", "Modified pages"])
+            Row::new(vec!["File", "Instructions", "Unique", "Time", "Modified pages", "Status"])
                 .style(Style::default().fg(Color::Yellow))
                 .bottom_margin(1),
         )
         .block(Block::default().title(title).borders(Borders::ALL).border_type(border_type))
         .highlight_style(selected_style)
         .widths(&[
-            Constraint::Percentage(40),
+            Constraint::Percentage(20),
             Constraint::Percentage(10),
             Constraint::Percentage(10),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
+            Constraint::Percentage(30),
         ]);
 
     f.render_stateful_widget(table, area, &mut app.crashes_widget.state);
@@ -476,7 +478,8 @@ fn replay_file<H: trace::Hook>(tx: &flume::Sender<Message>,
         trace_params: &trace::Params,
         fuzz_params: &fuzz::Params) -> Result<trace::Trace, TuiError> {
 
-    tx.send(Message::Log(format!("replaying input {}", path.display())))?;
+    let file_name = path.file_name().unwrap().to_str().unwrap();
+    tx.send(Message::Log(format!("replaying input {}", file_name)))?;
 
     let mut file = std::fs::File::open(&path)?;
     let mut data = Vec::new();
@@ -527,6 +530,8 @@ fn update_coverage<S: Snapshot + X64VirtualAddressSpace>(workdir: &Path, system:
         (Some(start), Some(end)) => end - start,
         _ => Duration::from_millis(0)
     };
+
+    corpus_file.status = trace.status.clone();
 
     let functions = collection.functions.clone();
     tx.send(Message::Coverage(functions))?;

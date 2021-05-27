@@ -77,7 +77,6 @@ where S: Snapshot + mem::X64VirtualAddressSpace
         partition.map_physical_memory(base, pages, 0x1000, permissions.bits())?;
         partition.write_physical_memory(base, data)?;
 
-       
         Ok(())
     }
 

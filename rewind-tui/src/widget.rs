@@ -6,7 +6,7 @@ pub use tui::widgets::{
     Paragraph, Row, Cell, Sparkline, Table, Tabs, Wrap, TableState, BorderType,
 };
 
-use rewind_core::fuzz;
+use rewind_core::{fuzz, trace::EmulationStatus};
  
 pub (crate) struct StatsWidget {
     pub coverage: u64
@@ -268,6 +268,7 @@ pub struct CorpusFile {
     pub count: u64,
     pub duration: Duration,
     pub modified_pages: usize,
+    pub status: EmulationStatus,
     // instructions count
     // time
 }
@@ -282,6 +283,7 @@ impl CorpusFile {
             count: 0,
             duration: Duration::from_secs(0),
             modified_pages: 0,
+            status: EmulationStatus::Success,
         }
     }
 }

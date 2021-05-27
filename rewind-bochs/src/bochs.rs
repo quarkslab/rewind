@@ -281,8 +281,11 @@ impl <S: Snapshot> hook::Hooks for BochsHooks <'_, S> {
                 unsafe { guest_mem::page_insert(base, pages as *mut u8) };
             },
             _ => {
-                println!("can't find page {:x} in dump", base);
+                let msg = format!("can't find page {:x} in dump", base);
                 let cpu = Cpu::from(0);
+                if let Some(trace) = self.trace.as_mut() {
+                    trace.status = EmulationStatus::Error(msg);
+                }
                 unsafe { cpu.set_run_state(RunState::Stop) };
             }
         };

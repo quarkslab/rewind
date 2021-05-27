@@ -261,7 +261,7 @@ impl FromStr for Params {
 }
 
 /// Tracing result
-#[derive(Debug, PartialEq, PartialOrd, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone)]
 pub enum EmulationStatus {
     /// Expected return address was executed
     Success,

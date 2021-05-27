@@ -16,11 +16,21 @@
 - [ ] fix symbol resolving
 - [ ] improve coverage (need a way to have function size)
 - [ ] improve error reporting
+- [ ] use some kind of DSL to drive tracer
+- [ ] split Tracer traits in sub-traits
+- [ ] add a trait for Tracer to improve fuzzing loop (no need to have a full trace, just need a bitmap to update)
+
 
 ## rewind-bochs
 
-- [ ] use bochscpu master
+- [X] use bochscpu master
 - [ ] improve mem accesses handling
+- [ ] use edge coverage
+
+## rewind-whvp
+
+- [ ] update to newest SDK (compilation error for now)
+- [ ] improve breakpoint handling (need a MESOS file?)
 
 ## rewind-cli
 
@@ -31,6 +41,7 @@
 
 ## rewind-core
 
+- [ ] improve fuzzing loop (trace is destroyed for every testcase, maybe use a bitmap)
 
 ## rewind-system
 
@@ -38,6 +49,6 @@
 
 ## rewind-snapshot
 
-- [ ] improve parsing
+- [ ] improve parsing (need to be more robust)
 - [X] add support for full dump
-- [ ] improve file-based snapshot
+- [X] improve file-based snapshot
