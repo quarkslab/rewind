@@ -69,8 +69,7 @@ Bochs is faster than WHVP when doing full trace and you also have the benefits o
 
 I decided to add bochs as another backend. ``whvp`` was not a proper name anymore and I settled on ``rewind``.
 
-![](examples/CVE-2020-17087/images/rewind_monitor_cng.png)
-*Monitor interface*
+![](examples/CVE-2020-17087/images/rewind.png)
 
 ## Prerequisites
 
@@ -184,7 +183,7 @@ A basic tutorial leveraging CVE-2020-17087 is provided in the [examples](/exampl
 
 ## Roadmap
 
-- See [TODO.md](/TODO.md)
+See [TODO.md](/TODO.md)
 
 ## Known Bugs/Limitations
 
