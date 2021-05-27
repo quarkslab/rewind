@@ -517,14 +517,14 @@ impl From<WHV_VP_EXCEPTION_CONTEXT> for ExceptionContext {
 #[allow(non_snake_case)]
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 pub enum CancelReason {
-    User = WHV_RUN_VP_CANCEL_REASON_WhvRunVpCancelReasonUser as isize,
+    User = WHV_RUN_VP_CANCEL_REASON_WHvRunVpCancelReasonUser as isize,
 }
 
 #[allow(non_upper_case_globals)]
 impl From<WHV_RUN_VP_CANCEL_REASON> for CancelReason {
     fn from(i: WHV_RUN_VP_CANCEL_REASON) -> Self {
         match i {
-            WHV_RUN_VP_CANCEL_REASON_WhvRunVpCancelReasonUser => CancelReason::User,
+            WHV_RUN_VP_CANCEL_REASON_WHvRunVpCancelReasonUser => CancelReason::User,
             _ => panic!("unknown CancelReason variant when constructing enum"),
         }
     }
