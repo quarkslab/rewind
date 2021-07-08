@@ -1,20 +1,35 @@
 # README
 
-This tool is a PoC for a snapshot-based coverage-guided fuzzer targeting Windows kernel components.
+Rewind is a snapshot-based coverage-guided fuzzer targeting
+Windows kernel components.
 
-The idea is to start from a snapshot of a live running system. This snapshot is composed of the physical memory pages along with the state of the cpu.
+The idea is to start from a snapshot of a live running system. This
+snapshot is composed of the physical memory pages along with the state
+of the cpu.
 
-This state is used to setup the initial state of a virtual cpu of some backend. With on-demand paging only the pages needed for the execution of the target function are read from the snapshot.
+This state is used to setup the initial state of a virtual cpu. By leveraging on-demand
+paging only the pages needed for the execution of the target function are read from the snapshot.
 
-As a result we obtain a small virtual machine.
+Because we use a dedicated virtual machine with only the physical memory pages useful for the execution of the target function, restoring a snapshot is fast.
 
-This small VM is then used to perform various tasks useful for a vulnerability researcher like getting an execution trace for the targeted function or fuzzing some user-controlled inputs.
+As of now 2 backends are available:
 
-As of now 2 backends are supported:
+-  ``WHVP`` backend leverages WHVP (Windows Hypervisor Platform) API to
+   provide access to a Hyper-V partition. See
+   https://docs.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform
+   for more details.
+-  ``Bochs`` backend leverages the Bochs emulator
+   (https://bochs.sourceforge.io/)
 
-- ``WHVP`` backend leverages WHVP (Windows Hypervisor Platform) API to provide access to a Hyper-V partition.
-See https://docs.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform for more details.
-- ``Bochs`` backend leverages the Bochs emulator (https://bochs.sourceforge.io/)
+A `KVM` backend is being developed and should be available soon.
+
+Rewind provides 2 main features:
+- the ability to trace an arbitrary function
+- the ability to fuzz an arbitrary function
+
+It also provides a basic TUI (Terminal User Interface) to report useful information regarding the fuzzing.
+
+It has been tested on Windows and Linux (only bochs backend for linux for now).
 
 ## Motivation
 
@@ -26,13 +41,12 @@ kernel debugger and craft some ghetto scripts to handle crash detection...
 
 Doing snapshot with virtual machines helps but it's slow.
 
-During 2018 Microsoft introduced a new set of API named Windows Hypervisor Platform (WHVP). These
+During 2018, Microsoft introduced a new set of API named Windows Hypervisor Platform (WHVP). These
 API allow to setup a partition (VM in hyper-V lingua) with some virtual processors and to have a
 control on the VM exits occurring in the virtual machine. It's almost like having your own
-VM-exit handler in userland. Quite handy to do useful things, for example:
-
-- https://github.com/ionescu007/Simpleator
-- https://github.com/gamozolabs/applepie
+VM-exit handler in userland. Quite handy to do useful things, for example
+[Simpleator](https://github.com/ionescu007/Simpleator)
+or [applepie](https://github.com/gamozolabs/applepie).
 
 So I started to play with WHVP and made a first PoC allowing me to execute
 in a Hyper-V partition some shellcode. It was written in Python and quite slow. This first PoC
@@ -46,24 +60,37 @@ With this I was able to fork the state of the dump into a partition and then res
 It allowed me to easily trace the execution of my target function. By modifying the arguments and
 reverting the memory state of the partition it was also really easy to fuzz the target.
 
-This work was presented at a French conference in 2020 (https://www.sstic.org/2020/presentation/fuzz_and_profit_with_whvp/) and released on github (https://github.com/quarkslab/whvp).
+This work was presented at SSTIC conference in [2020](https://www.sstic.org/2020/presentation/fuzz_and_profit_with_whvp/) and
+released on [github](https://github.com/quarkslab/whvp).
 
 The tool implements 2 possibilities to obtain the coverage. The first one leverages the classical TF (Trap Flag) to have INT1 interruptions on every instruction. 
 It requires to modify the target and it's slow. I would have preferred to use [MONITOR](http://hypervsir.blogspot.com/2014/11/monitor-trap-flag-mtf-usage-in-ept.html) trap flag. But WHVP doesn't offer this possibility.
 
-In order to have proper performances (required for fuzzing), I decided to reduce the precision of the coverage and add a mode when you only know when an instruction is executed for the first time.
+In order to have proper performances (required for fuzzing), I decided to reduce the precision of
+the coverage and add a mode when you only know when an instruction is executed for the first time.
 
-To do that I patch the pages fetched from the snapshot with 0xcc bytes (only for executable pages). When the cpu will execute these patched instructions the hypervisor will trap the exception and rewrite the instructions with the original code.
+To do that I patch the pages fetched from the snapshot with 0xcc bytes (only for executable pages).
+When the cpu will execute these patched instructions the hypervisor will trap the exception and
+rewrite the instructions with the original code.
 
-It's like having a unique software breakpoint set on every instruction. It works 95% of the time but in particular piece of code (ones with jump tables for example) it will fail because data will be replaced.
+It's like having a unique software breakpoint set on every instruction. It works 95% of the time but
+in particular piece of code (ones with jump tables for example) it will fail because data will be
+replaced.
 
-To overcome this one option would be to disassemble the code before mapping it and only patch what is needed (maybe next time).
+To overcome this one option would be to disassemble the code before mapping it and only patch what
+is needed (maybe next time).
 
-During my experiment I encountered several limitations when using WHVP. It's slow, like really slow. [VirtualBox](https://www.virtualbox.org/browser/vbox/trunk/src/VBox/VMM/VMMR3/NEMR3Native-win.cpp) source code have some interesting comments :)
+During my experiment I encountered several limitations when using WHVP. It's slow, like really slow.
+[VirtualBox](https://www.virtualbox.org/browser/vbox/trunk/src/VBox/VMM/VMMR3/NEMR3Native-win.cpp)
+source code have some interesting comments :)
 
-So to have proper performance you really need to limit VM exits and it's incompatible if you want to use Hyper-V as a tracing hypervisor (since it requires a lot of VM exits).
+So to have proper performance you really need to limit VM exits and it's incompatible if you want to
+use Hyper-V as a tracing hypervisor (since it requires a lot of VM exits).
 
-During the same time I started to use [bochs](https://bochs.sourceforge.io/cgi-bin/lxr/source/instrument/instrumentation.txt) (specially the instrumentation part) to check if the traces obtained by the tool were correct. Bochs was some kind of oracle to see if I had divergent traces.
+During the same time I started to use
+[bochs](https://bochs.sourceforge.io/cgi-bin/lxr/source/instrument/instrumentation.txt) (specially
+the instrumentation part) to check if the traces obtained by the tool were correct. Bochs was some
+kind of oracle to see if I had divergent traces.
 
 Bochs is faster than WHVP when doing full trace and you also have the benefits of having memory accesses plus other useful goodies.
 
@@ -71,16 +98,41 @@ I decided to add bochs as another backend. ``whvp`` was not a proper name anymor
 
 ![](examples/CVE-2020-17087/images/rewind.png)
 
+## Typical usage
+
+``rewind`` was designed around my own workflow when I’m conducting
+security assessments for kernel drivers on Windows platform.
+
+The first step is to install the target software inside a virtual
+machine. Since I’im using a mix of static and dynamic analysis I will
+also setup a kernel debugger.
+
+After having opened some random drivers in IDA, I’ll quickly begin to
+target some functions. To do that I usually put some breakpoints with
+``windbg`` and combined with [ret-sync](https://github.com/bootleg/ret-sync)
+I can start to play.
+
+That’s where ``rewind`` comes into play. Instead of editing random
+buffer in memory and singlestep and annotate the IDB to have a rough
+idea of what’s is going on. I’ll take a snapshot with ``windbg`` and use
+``rewind`` instead.
+
+It will ease the process a lot. Having a snapshot offers a lot of
+advantages. Everything is deterministic. You can replay ad nauseum a
+function call. You can launch a fuzzer if the target function looks
+interesting. You can even close the VM since it’s not needed anymore.
+
 ## Prerequisites
 
-Obviously you need Rust (installation tested on Windows and Linux with Rust 1.50). CMake is also needed by some dependencies.
+Obviously you need Rust (installation tested on Windows and Linux with Rust 1.50). CMake is also
+needed by some dependencies.
 
 ## Git
 
 First clone the repository:
 
 ```
-$ git clone gitlab@gitlab.qb:daumaitre/rewind.git
+$ git clone git@github.com:quarkslab/rewind.git
 ```
 
 Continue with the installation of bochs backend
@@ -164,18 +216,6 @@ $ cargo +nightly install --path .
 
 - if Windows SDK is different of the supported ones, `whvp-sys` will fail to build
 
-
-## Typical usage
-
-`rewind` was designed around my own workflow when I'm conducting security assessments for kernel drivers on Windows platform.
-
-The first step is to install the target software inside a virtual machine. Since I'im using a mix of static and dynamic analysis I will also setup a kernel debugger.
-
-After having opened some random drivers in IDA, I'll quickly begin to target some functions. To do that I usually put some breakpoints with `windbg` and combined with `ret-sync` (https://github.com/bootleg/ret-sync) I can start to play.
-
-That's where `rewind` comes into play. Instead of editing random buffer in memory and singlestep and annotate the IDB to have a rough idea of what's is going on. I'll take a snapshot with `windbg` and use `rewind` instead.
-
-It will ease the process a lot. Having a snapshot offers a lot of advantages. Everything is deterministic. You can replay ad nauseum a function call. You can launch a fuzzer if the target function looks interesting. You can even close the VM since it's not needed anymore.
 
 ## Examples
 
