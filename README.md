@@ -104,7 +104,7 @@ I decided to add bochs as another backend. ``whvp`` was not a proper name anymor
 security assessments for kernel drivers on Windows platform.
 
 The first step is to install the target software inside a virtual
-machine. Since I’im using a mix of static and dynamic analysis I will
+machine. Since I’m using a mix of static and dynamic analysis I will
 also setup a kernel debugger.
 
 After having opened some random drivers in IDA, I’ll quickly begin to
