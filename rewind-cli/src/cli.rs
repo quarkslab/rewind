@@ -831,7 +831,7 @@ pub struct SnapshotExtract {
     pub path: std::path::PathBuf,
 
     /// Physical pages to extract (in hexadecimal)
-    #[clap(multiple(true), number_of_values(1), parse(try_from_str=parse_hex))]
+    #[clap(multiple_values(true), number_of_values(1), parse(try_from_str=parse_hex))]
     pub addresses: Vec<usize>,
 
 }
