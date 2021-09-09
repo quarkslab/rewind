@@ -11,6 +11,9 @@ pub use rewind_bochs::BochsTracer;
 #[cfg(windows)]
 pub use rewind_whvp::WhvpTracer;
 
+#[cfg(unix)]
+pub use rewind_kvm::KvmTracer;
+
 #[doc(hidden)]
 mod helpers;
 pub mod cli;
@@ -24,7 +27,10 @@ pub enum BackendType {
     #[cfg(windows)]
     Whvp,
     /// Bochs
-    Bochs
+    Bochs,
+    /// KVM
+    #[cfg(unix)]
+    Kvm,
 }
 
 impl FromStr for BackendType {
@@ -34,6 +40,8 @@ impl FromStr for BackendType {
             "bochs" => Ok(Self::Bochs),
             #[cfg(windows)]
             "whvp" => Ok(Self::Whvp),
+            #[cfg(unix)]
+            "kvm" => Ok(Self::Kvm),
             _ => Err("no match"),
         }
     }
@@ -49,6 +57,10 @@ impl std::fmt::Display for BackendType {
             #[cfg(windows)]
             Self::Whvp => {
                 f.write_str("whvp")
+            }
+            #[cfg(unix)]
+            Self::Kvm => {
+                f.write_str("kvm")
             }
         }
     }

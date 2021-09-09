@@ -30,7 +30,12 @@ where S: snapshot::Snapshot {
     Whvp(rewind_whvp::WhvpTracer<'a, S>),
 
     /// Bochs backend
-    Bochs(rewind_bochs::BochsTracer<'a, S>)
+    Bochs(rewind_bochs::BochsTracer<'a, S>),
+
+    /// Kvm backend
+    #[cfg(unix)]
+    Kvm(rewind_kvm::KvmTracer<'a, S>)
+
 }
 
 impl<'a, S> trace::Tracer for Backend<'a, S>
@@ -40,7 +45,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.get_state(),
-            Self::Bochs(tracer) => tracer.get_state()
+            Self::Bochs(tracer) => tracer.get_state(),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.get_state(),
         }
     }
 
@@ -48,7 +55,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.set_state(state),
-            Self::Bochs(tracer) => tracer.set_state(state)
+            Self::Bochs(tracer) => tracer.set_state(state),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.set_state(state),
         }
     }
 
@@ -56,7 +65,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.run(params, hook),
-            Self::Bochs(tracer) => tracer.run(params, hook)
+            Self::Bochs(tracer) => tracer.run(params, hook),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.run(params, hook),
         }
     }
 
@@ -64,7 +75,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.restore_snapshot(),
-            Self::Bochs(tracer) => tracer.restore_snapshot()
+            Self::Bochs(tracer) => tracer.restore_snapshot(),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.restore_snapshot(),
         }
     }
 
@@ -72,7 +85,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.read_gva(cr3, vaddr, data),
-            Self::Bochs(tracer) => tracer.read_gva(cr3, vaddr, data)
+            Self::Bochs(tracer) => tracer.read_gva(cr3, vaddr, data),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.read_gva(cr3, vaddr, data),
         }
     }
 
@@ -80,7 +95,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => Tracer::write_gva(tracer, cr3, vaddr, data),
-            Self::Bochs(tracer) => Tracer::write_gva(tracer, cr3, vaddr, data)
+            Self::Bochs(tracer) => Tracer::write_gva(tracer, cr3, vaddr, data),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => Tracer::write_gva(tracer, cr3, vaddr, data),
         }
     }
 
@@ -88,7 +105,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.cr3(),
-            Self::Bochs(tracer) => tracer.cr3()
+            Self::Bochs(tracer) => tracer.cr3(),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.cr3(),
         }
     }
 
@@ -96,7 +115,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.singlestep(params, hook),
-            Self::Bochs(tracer) => tracer.singlestep(params, hook)
+            Self::Bochs(tracer) => tracer.singlestep(params, hook),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.singlestep(params, hook),
         }
     }
 
@@ -104,7 +125,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.add_breakpoint(address),
-            Self::Bochs(tracer) => tracer.add_breakpoint(address)
+            Self::Bochs(tracer) => tracer.add_breakpoint(address),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.add_breakpoint(address),
         }
 
     }
@@ -113,7 +136,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.get_mapped_pages(),
-            Self::Bochs(tracer) => tracer.get_mapped_pages()
+            Self::Bochs(tracer) => tracer.get_mapped_pages(),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.get_mapped_pages(),
         }
     }
 }
@@ -127,7 +152,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.read_gpa(gpa, buf),
-            Self::Bochs(tracer) => tracer.read_gpa(gpa, buf)
+            Self::Bochs(tracer) => tracer.read_gpa(gpa, buf),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.read_gpa(gpa, buf)
         }
     }
 
@@ -135,7 +162,9 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         match self {
             #[cfg(windows)]
             Self::Whvp(tracer) => tracer.write_gpa(gpa, data),
-            Self::Bochs(tracer) => tracer.write_gpa(gpa, data)
+            Self::Bochs(tracer) => tracer.write_gpa(gpa, data),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.write_gpa(gpa, data)
         }
     }
 }
@@ -221,6 +250,10 @@ pub trait Rewind {
             #[cfg(windows)]
             crate::BackendType::Whvp => {
                 Backend::Whvp(rewind_whvp::WhvpTracer::new(&snapshot)?)
+            },
+            #[cfg(unix)]
+            crate::BackendType::Kvm => {
+                Backend::Kvm(rewind_kvm::KvmTracer::new(&snapshot)?)
             }
         };
 
@@ -553,13 +586,13 @@ pub trait Rewind {
 
         let mut input = trace::Input::default();
 
-        let input_address = u64::from_str_radix(&args.input_address.trim_start_matches("0x"), 16)
+        let input_address = u64::from_str_radix(args.input_address.trim_start_matches("0x"), 16)
             .wrap_err_with(|| "can't parse input address")?;
 
         input.address = input_address;
         fuzz_params.input = input_address;
 
-        let input_size = u64::from_str_radix(&args.input_size.trim_start_matches("0x"), 16)
+        let input_size = u64::from_str_radix(args.input_size.trim_start_matches("0x"), 16)
             .wrap_err_with(|| "can't parse input size")?;
 
         input.size = input_size;
@@ -662,11 +695,14 @@ pub trait Rewind {
         let mut tracer = match args.backend {
             crate::BackendType::Bochs => {
                 Backend::Bochs(rewind_bochs::BochsTracer::new(&snapshot))
-
             },
             #[cfg(windows)]
             crate::BackendType::Whvp => {
                 Backend::Whvp(rewind_whvp::WhvpTracer::new(&snapshot)?)
+            }
+            #[cfg(unix)]
+            crate::BackendType::Kvm => {
+                Backend::Kvm(rewind_kvm::KvmTracer::new(&snapshot)?)
             }
         };
         
@@ -883,7 +919,7 @@ pub struct TracerRun {
     pub trace: Option<std::path::PathBuf>,
 
     /// Tracing backend
-    #[clap(long="backend", possible_values(&["whvp", "bochs"]), default_value="bochs")]
+    #[clap(long="backend", possible_values(&["whvp", "bochs", "kvm"]), default_value="bochs")]
     pub backend: crate::BackendType,
 
     /// Tracing coverage
@@ -1043,7 +1079,7 @@ pub struct FuzzerRun {
     pub max_time: u64,
 
     /// Tracer backend
-    #[clap(long="backend", possible_values(&["whvp", "bochs"]), default_value="bochs")]
+    #[clap(long="backend", possible_values(&["whvp", "bochs", "kvm"]), default_value="bochs")]
     pub backend: crate::BackendType,
 
     /// Coverage mode
@@ -1080,7 +1116,7 @@ pub struct FuzzerMonitor {
 
 fn decode_instruction(buffer: &[u8]) -> Result<zydis::DecodedInstruction> {
     let decoder = zydis::Decoder::new(zydis::MachineMode::LONG_64, zydis::AddressWidth::_64)?;
-    let result = decoder.decode(&buffer)?;
+    let result = decoder.decode(buffer)?;
     if let Some(instruction) = result {
         Ok(instruction)
     } else {
