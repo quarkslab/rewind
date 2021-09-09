@@ -1,10 +1,9 @@
 
 
 use std::char::DecodeUtf16Error;
+use zerocopy::{LayoutVerified, FromBytes};
 
 use thiserror::Error;
-
-use deku::prelude::*;
 
 use rewind_core::{mem::X64VirtualAddressSpace, snapshot::Snapshot};
 
@@ -20,10 +19,6 @@ pub enum SystemError {
     /// Can't read debug info from virtual memory
     #[error("mem error: {0}")]
     MemError(#[from] rewind_core::mem::VirtMemError),
-
-    /// Deku error
-    #[error("deku error: {0}")]
-    DekuError(#[from] deku::error::DekuError),
 
     /// Can't decode UTF-16 string
     #[error("decode error: {0}")]
@@ -79,7 +74,8 @@ where S: Snapshot + X64VirtualAddressSpace
 
         while address != module_list {
             self.snapshot.read_gva(cr3, address, &mut data)?;
-            let (_, entry) = LdrDataTableEntry::from_bytes((&data, 0))?;
+            let (entry, _) = LayoutVerified::<_, LdrDataTableEntry>::new_from_prefix(&data[..])
+                .ok_or_else(|| SystemError::ParseError("can't read ldr data".into()))?;
 
             address = entry.InLoadOrderLinks.Flink;
 
@@ -126,13 +122,16 @@ where S: Snapshot + X64VirtualAddressSpace
 
         let mut buf = vec![0u8; 0x1000];
         self.snapshot.read_gva(cr3, addr, &mut buf)?;
-        let (_, header) = pe::ImageDosHeader::from_bytes((&buf, 0))?;
+
+        let (header, _) = LayoutVerified::<_, pe::ImageDosHeader>::new_from_prefix(&buf[..])
+            .ok_or_else(|| SystemError::ParseError("can't read dos header".into()))?;
 
         let offset = header.e_lfanew as usize;
 
-        let (_, header) = pe::ImageNtHeaders64::from_bytes((&buf[offset..], 0))?;
+        let (header, _) = LayoutVerified::<_, pe::ImageNtHeaders64>::new_from_prefix(&buf[offset..])
+            .ok_or_else(|| SystemError::ParseError("can't read nt header".into()))?;
 
-        let info: pe::FileInformation = header.into();
+        let info: pe::FileInformation = header.into_ref().into();
         Ok(info)
 
     }
@@ -146,11 +145,13 @@ where S: Snapshot + X64VirtualAddressSpace
         let mut buf = vec![0u8; 0x1000];
         self.snapshot.read_gva(cr3, addr, &mut buf)?;
 
-        let (_, header) = pe::ImageDosHeader::from_bytes((&buf, 0))?;
+        let (header, _) = LayoutVerified::<_, pe::ImageDosHeader>::new_from_prefix(&buf[..])
+            .ok_or_else(|| SystemError::ParseError("can't read dos header".into()))?;
 
         let offset = header.e_lfanew as usize;
 
-        let (_, header) = pe::ImageNtHeaders64::from_bytes((&buf[offset..], 0))?;
+        let (header, _) = LayoutVerified::<_, pe::ImageNtHeaders64>::new_from_prefix(&buf[offset..])
+            .ok_or_else(|| SystemError::ParseError("can't read nt header".into()))?;
 
         let debug_directory = &header.optional_header.data_directories[6];
         let address = module.base + debug_directory.virtual_address as u64;
@@ -158,7 +159,8 @@ where S: Snapshot + X64VirtualAddressSpace
 
         self.snapshot.read_gva(cr3, address, &mut buf[..size])?;
 
-        let (_, directory) = pe::ImageDebugDirectory::from_bytes((&buf, 0))?;
+        let (directory, _) = LayoutVerified::<_, pe::ImageDebugDirectory>::new_from_prefix(&buf[..])
+            .ok_or_else(|| SystemError::ParseError("can't debug directory".into()))?;
 
         if directory.debug_type != 2 {
             return Err(SystemError::ParseError(format!("debug type {:x} is not handled (yet)", directory.debug_type)));
@@ -169,7 +171,8 @@ where S: Snapshot + X64VirtualAddressSpace
         let size = directory.size_of_data as usize;
         self.snapshot.read_gva(cr3, address, &mut buf[..size])?;
 
-        let (_, debug) = pe::CodeView::from_bytes((&buf, 0))?;
+        let (debug, _) = LayoutVerified::<_, pe::CodeView>::new_from_prefix(&buf[..])
+            .ok_or_else(|| SystemError::ParseError("can't read codeview structure".into()))?;
 
         if debug.signature != 0x53445352 {
             return Err(SystemError::ParseError(format!("invalid codeview signature {:x}", debug.signature)));
@@ -178,7 +181,7 @@ where S: Snapshot + X64VirtualAddressSpace
         let name = String::from_utf8_lossy(&buf[0x18..size-1]);
         let info = pe::DebugInformation {
             name: name.to_string(),
-            guid: debug.guid,
+            guid: debug.guid.clone(),
             age: debug.age,
         };
         Ok(info)
@@ -186,15 +189,17 @@ where S: Snapshot + X64VirtualAddressSpace
     }
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug)]
 #[allow(non_snake_case)]
+#[repr(C)]
 struct ListEntry {
     Flink: u64,
     Blink: u64
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug)]
 #[allow(non_snake_case)]
+#[repr(C)]
 struct UnicodeString {
     Length: u16,
     MaximumLength: u16,
@@ -202,8 +207,9 @@ struct UnicodeString {
     Buffer: u64
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug)]
 #[allow(non_snake_case)]
+#[repr(C)]
 struct LdrDataTableEntry {
     InLoadOrderLinks: ListEntry,
     InMemoryOrderLinks: ListEntry,

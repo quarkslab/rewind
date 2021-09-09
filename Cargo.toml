@@ -5,6 +5,7 @@ members = [
     "rewind-snapshot",
     "rewind-whvp",
     "rewind-bochs",
+    "rewind-kvm",
     "rewind-system",
     "rewind-tui",
     "rewind-cli",
@@ -18,3 +19,4 @@ exclude = [
     "examples",
     "vendor",
 ]
+
