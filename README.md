@@ -139,23 +139,23 @@ Continue with the installation of bochs backend
 
 ### Bochs
 
-Clone bochscpu (https://github.com/yrp604/bochscpu) repository in the ``vendor`` directory:
+Clone bochscpu (https://github.com/erynian/bochscpu.git) repository in the ``vendor`` directory:
 
 ```
 $ cd vendor
-$ git clone https://github.com/yrp604/bochscpu
+$ git clone https://github.com/erynian/bochscpu.git
 ```
 
 Download the prebuilt bochs artifacts from bochscpu-build (https://github.com/yrp604/bochscpu-build)
 
 ```
-$ curl.exe [artifact_url] --output bochs-x64-win.zip
+$ curl.exe -L --output bochs-x64-win.zip [artifact_url]
 ```
 
 Extract the ``lib`` and ``bochs`` folders into the bochscpu checkout.
 
 ```
-$ Expand-Archive -Path .\boch-x64-win.zip -DestinationPath .\
+$ Expand-Archive -Path .\bochs-x64-win.zip -DestinationPath .\
 $ copy -Recurse .\bochs-x64-win\msvc\* .\bochscpu\
 ```
 
