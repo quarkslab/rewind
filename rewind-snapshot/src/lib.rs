@@ -6,13 +6,14 @@
 //! Support full kernel dump and bitmap kernel dump
 
 
-use std::{io::{Read, Write, BufWriter}, sync::Mutex};
+use std::{io::{Read, Write, BufWriter}, sync::{Arc, Mutex}};
 
+use memmap::Mmap;
 use serde::{Serialize, Deserialize};
 
-use dump::ParserError;
+use dump::{ParserError, RawDmp};
 
-use rewind_core::{error::GenericError, snapshot::{Snapshot, SnapshotError}};
+use rewind_core::{X64Snapshot, error::GenericError, snapshot::{Snapshot, SnapshotError}};
 use rewind_core::mem::{self, X64VirtualAddressSpace, VirtMemError};
 
 mod dump;
@@ -20,7 +21,7 @@ mod dump;
 /// Dump-based snapshot
 pub struct DumpSnapshot <'a> {
     dump: dump::RawDmp<'a>,
-    pages: std::cell::RefCell<Vec<u64>>,
+    pages: Mutex<Vec<u64>>,
 }
 
 impl <'a> DumpSnapshot <'a> {
@@ -31,7 +32,7 @@ impl <'a> DumpSnapshot <'a> {
 
         let snapshot = DumpSnapshot {
             dump,
-            pages: std::cell::RefCell::new(Vec::new()),
+            pages: Mutex::new(Vec::new()),
         };
 
         Ok(snapshot)
@@ -52,7 +53,8 @@ impl <'a> DumpSnapshot <'a> {
         })?;
 
         let snapshot = FileSnapshot::new(path)?;
-        let pages: Vec<u64> = self.pages.borrow().iter().cloned().collect();
+        let pages = self.pages.lock().unwrap();
+        // let pages: Vec<u64> = self.pages.borrow().iter().cloned().collect();
         for page in pages.iter() {
             let mut data = vec![0u8; 0x1000];
             Snapshot::read_gpa(self, *page, &mut data)?;
@@ -76,7 +78,7 @@ impl <'a> Snapshot for DumpSnapshot <'a> {
         match self.dump.physmem.get(&base) {
             Some(b) => {
                 buffer[..size].clone_from_slice(&b[offset..offset+size]);
-                self.pages.borrow_mut().push(base);
+                self.pages.lock().unwrap().push(base);
             }
             None => {
                 return Err(SnapshotError::MissingPage(base))
@@ -107,6 +109,7 @@ impl <'a> X64VirtualAddressSpace for DumpSnapshot <'a> {
     }
 
 }
+
 /// User-controlled input
 #[derive(Default, Serialize, Deserialize, Debug)]
 pub struct SnapshotContext {
@@ -228,6 +231,10 @@ impl X64VirtualAddressSpace for FileSnapshot {
 
 }
 
+impl X64Snapshot for FileSnapshot {
+
+}
+
 /// Available snapshots
 pub enum SnapshotKind <'a> {
     /// Kernel dump snapshots
@@ -291,6 +298,9 @@ impl <'a> X64VirtualAddressSpace for SnapshotKind<'a> {
     }
 }
 
+impl <'a> X64Snapshot for SnapshotKind<'a> {
+
+}
 
 impl From<ParserError> for SnapshotError {
 

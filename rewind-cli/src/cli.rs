@@ -34,7 +34,7 @@ where S: snapshot::Snapshot {
 
     /// Kvm backend
     #[cfg(unix)]
-    Kvm(rewind_kvm::KvmTracer<'a, S>)
+    Kvm(rewind_kvm::KvmTracer)
 
 }
 
@@ -223,7 +223,9 @@ pub trait Rewind {
             let fp = std::fs::File::open(&dump_path).wrap_err(format!("Can't load snapshot {}", dump_path.display()))?;
             buffer = unsafe { MmapOptions::new().map(&fp)? };
 
-            let snapshot = DumpSnapshot::new(&buffer)?;
+            // FIXME: ugly
+            let static_buffer: &'static [u8] = Box::leak(Box::new(buffer));
+            let snapshot = DumpSnapshot::new(static_buffer)?;
             SnapshotKind::DumpSnapshot(snapshot)
         } else {
             let snapshot = FileSnapshot::new(&args.snapshot)?;
@@ -245,7 +247,6 @@ pub trait Rewind {
         let mut tracer = match args.backend {
             crate::BackendType::Bochs => {
                 Backend::Bochs(rewind_bochs::BochsTracer::new(&snapshot))
-
             },
             #[cfg(windows)]
             crate::BackendType::Whvp => {
@@ -253,7 +254,7 @@ pub trait Rewind {
             },
             #[cfg(unix)]
             crate::BackendType::Kvm => {
-                Backend::Kvm(rewind_kvm::KvmTracer::new(&snapshot)?)
+                Backend::Kvm(rewind_kvm::KvmTracer::new(snapshot)?)
             }
         };
 
@@ -349,7 +350,7 @@ pub trait Rewind {
 
         if let Some(path) = &args.save_mem {
             progress.single(format!("saving fetched physical pages to {}", path.display()));
-            snapshot.save(&path)?;
+            // snapshot.save(&path)?;
         }
 
         Ok(())
@@ -672,7 +673,9 @@ pub trait Rewind {
             let fp = std::fs::File::open(&dump_path).wrap_err(format!("Can't load snapshot {}", dump_path.display()))?;
             buffer = unsafe { MmapOptions::new().map(&fp)? };
 
-            let snapshot = DumpSnapshot::new(&buffer)?;
+            // FIXME: ugly
+            let static_buffer: &'static [u8] = Box::leak(Box::new(buffer));
+            let snapshot = DumpSnapshot::new(static_buffer)?;
             SnapshotKind::DumpSnapshot(snapshot)
         } else {
             let snapshot = FileSnapshot::new(&snapshot_path)?;
@@ -702,7 +705,7 @@ pub trait Rewind {
             }
             #[cfg(unix)]
             crate::BackendType::Kvm => {
-                Backend::Kvm(rewind_kvm::KvmTracer::new(&snapshot)?)
+                Backend::Kvm(rewind_kvm::KvmTracer::new(snapshot)?)
             }
         };
         

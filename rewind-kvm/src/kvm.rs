@@ -5,11 +5,12 @@ use std::time::Instant;
 use kvm_ioctls::VcpuExit;
 use kvm_ioctls::{Kvm, VcpuFd, VmFd};
 
-use kvm_bindings::{KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_SW_BP, Msrs, kvm_guest_debug, kvm_guest_debug_arch, kvm_msr_entry, kvm_userspace_memory_region};
+use kvm_bindings::{KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP, KVM_GUESTDBG_USE_SW_BP, Msrs, kvm_guest_debug, kvm_guest_debug_arch, kvm_msr_entry, kvm_userspace_memory_region};
 use kvm_bindings::KVM_MEM_LOG_DIRTY_PAGES;
 
 use rewind_core::mem::{self, VirtMemError, X64VirtualAddressSpace};
 use rewind_core::snapshot::Snapshot;
+use rewind_core::X64Snapshot;
 use rewind_core::trace::{self, Context, CoverageMode, EmulationStatus, Params, ProcessorState, Trace, Tracer, TracerError};
 
 /// Error
@@ -41,10 +42,6 @@ struct RunState {
     breakpoints: Vec<Gpa>,
 }
 
-pub trait X64Snapshot: Snapshot + X64VirtualAddressSpace {
-
-}
-
 /// Kvm based tracer        
 pub struct KvmTracer {
     // snapshot: SharedSnapshot<S>,
@@ -61,7 +58,7 @@ impl KvmTracer
 {
     /// Instanciate a tracer over a snapshot
     pub fn new<S>(snapshot: S) -> Result<Self, KvmError>
-    where S: 'static + X64Snapshot + std::marker::Sync + std::marker::Send
+    where S: 'static + X64Snapshot + std::marker::Send
     {
         let kvm = Kvm::new()?;
 
@@ -187,7 +184,7 @@ impl KvmTracer
         let debug_struct = kvm_guest_debug {
             // Configure the vcpu so that a KVM_DEBUG_EXIT would be generated
             // when encountering a software breakpoint during execution
-            control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP,
+            control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP | KVM_GUESTDBG_USE_HW_BP,
             pad: 0,
             // Reset all x86-specific debug registers
             arch: kvm_guest_debug_arch {
@@ -208,6 +205,26 @@ impl KvmTracer
             ..Default::default()
         };
         self.vcpu_fd.set_guest_debug(&debug_struct).unwrap();
+    }
+
+    fn enable_singlestep_on_branch(&self) {
+        const MSR_DEBUG_CTL: u32 = 0x000001d9;
+        let msrs = Msrs::from_entries(&[
+            kvm_msr_entry {
+                index: MSR_DEBUG_CTL,
+                data: 1u64 << 1,
+                ..Default::default()
+            },
+        ]).unwrap();
+
+        let written = self.vcpu_fd.set_msrs(&msrs).map_err(|_|
+            TracerError::UnknownError("set_msrs failed".into())
+        ).unwrap();
+
+        let mut vcpu_regs = self.vcpu_fd.get_regs().unwrap();
+        vcpu_regs.rflags |= 0x100;
+        self.vcpu_fd.set_regs(&vcpu_regs).unwrap();
+
     }
 
     fn get_context(&self) -> Result<Context, TracerError> {
@@ -235,18 +252,18 @@ impl KvmTracer
         Ok(context)
     }
 
-    fn _get_dirty_pages(&self) -> Result<Vec<u64>, TracerError> {
+    fn get_dirty_pages(&self) -> Result<Vec<u64>, TracerError> {
         let mut dirty_pages = Vec::new();
         for mem_region in self.mem_regions.iter() {
 
             let dirty_pages_bitmap = self.vm_fd.get_dirty_log(mem_region.slot, mem_region.memory_size as usize).unwrap();
 
-            for (index, bitmap) in dirty_pages_bitmap.iter().enumerate() {
-                if *bitmap == 0 {
+            for (index, &bitmap) in dirty_pages_bitmap.iter().enumerate() {
+                if bitmap == 0 {
                     continue
                 }
                 for bit_index in 0..64 {
-                    let bit = (*bitmap >> index) & 1;
+                    let bit = (bitmap >> bit_index) & 1;
                     if bit == 0 {
                         continue
                     }
@@ -263,7 +280,7 @@ impl KvmTracer
         Ok(dirty_pages)
     }
 
-    fn get_dirty_pages(&self) -> Result<Vec<Gpa>, TracerError> {
+    fn _get_dirty_pages(&self) -> Result<Vec<Gpa>, TracerError> {
         let mapped_pages = self.state.lock().unwrap().mapped_pages.clone();
         Ok(mapped_pages)
     }
@@ -483,13 +500,19 @@ impl Tracer for KvmTracer {
     }
 
     fn run<H: trace::Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace, TracerError> {
-
         let cr3 = self.snapshot.lock().unwrap().get_cr3();
         let gpa = self.snapshot.lock().unwrap().translate_gva(cr3, params.return_address)?;
 
         self.state.lock().unwrap().breakpoints.push(gpa);
 
-        // FIXME: set forbidden addresses
+        for (_, &gva) in params.excluded_addresses.iter() {
+            let gpa = self.snapshot.lock().unwrap().translate_gva(cr3, gva)?;
+            self.state.lock().unwrap().breakpoints.push(gpa);
+        }
+
+        if params.coverage_mode == CoverageMode::Instrs {
+            self.enable_singlestep();
+        }
 
         let mut trace = Trace::new();
         let context = self.get_context()?;
@@ -534,7 +557,7 @@ impl Tracer for KvmTracer {
                     break;
                 }
                 VcpuExit::Debug(event) => {
-                    // println!("Got exception {} at {:x}", event.exception, event.pc);
+                    println!("Got exception {} at {:x}", event.exception, event.pc);
                     if event.pc == params.return_address {
                         println!("got return address");
                         trace.status = EmulationStatus::Success;
@@ -555,6 +578,7 @@ impl Tracer for KvmTracer {
                     println!("{:#x?}", vcpu_regs);
                     let vcpu_sregs = self.vcpu_fd.get_sregs().unwrap();
                     println!("{:#x?}", vcpu_sregs);
+                    println!("{:#x?}", self.state.lock().unwrap());
                     panic!("Unexpected exit reason: {:?}", r);
                 }
             }
@@ -727,10 +751,6 @@ mod test {
         fn patch_page(&self, _: u64) -> bool {
             todo!()
         }
-    }
-
-    impl X64Snapshot for FileSnapshot {
-
     }
 
     #[test]
@@ -952,5 +972,131 @@ mod test {
         // FIXME: it should be 2 ...
         assert_eq!(modified_pages, 9);
     }
+
+    #[test]
+    fn test_dirty_log2() {
+        use pretty_assertions::assert_eq;
+        use pretty_hex::*;
+
+        let path = std::path::PathBuf::from("../examples/CVE-2020-17087/snapshots/17763.1.amd64fre.rs5_release.180914-1434/cng/ConfigIoHandler_Safeguarded");
+        let snapshot = FileSnapshot::new(&path).unwrap();
+
+        let context = trace::ProcessorState::load(path.join("context.json")).unwrap();
+
+        let mut tracer = KvmTracer::new(snapshot).unwrap();
+
+        let modified_pages = tracer.restore_snapshot().unwrap();
+        assert_eq!(modified_pages, 0);
+
+        let mut params = trace::Params::default();
+        let mut hook = TestHook::default();
+
+        params.return_address = 0xfffff8051b28643c;
+        params.save_context = true;
+
+        tracer.set_state(&context).unwrap();
+        tracer.enable_singlestep();
+
+        let trace = tracer.run(&params, &mut hook).unwrap();
+        println!("trace lasted {:?}", trace.end.unwrap() - trace.start.unwrap());
+
+        let state = tracer.get_state().unwrap();
+
+        assert_eq!(state.rip, params.return_address);
+        assert_eq!(trace.seen.len(), 7);
+        assert_eq!(trace.coverage.len(), 7);
+        assert_eq!(trace.status, trace::EmulationStatus::Success);
+
+        let mut mapped_pages = tracer._get_dirty_pages().unwrap();
+        assert_eq!(mapped_pages.len(), 9);
+        println!("{:#x?}", mapped_pages);
+    
+        let mut expected_pages = [0x235500000,
+                                      0x3a08000,
+                                      0x3a09000,
+                                      0x3a18000,
+                                      0x237f32000,
+                                      0xb0c000,
+                                      0xb0d000,
+                                      0x20c7d8000,
+                                      0x125a3d000];
+
+        assert_eq!(mapped_pages.sort(), expected_pages.sort());
+
+        tracer.set_state(&context).unwrap();
+        tracer.enable_singlestep();
+        let trace = tracer.run(&params, &mut hook).unwrap();
+
+        let mapped_pages = tracer._get_dirty_pages().unwrap();
+        println!("{:#x?}", mapped_pages);
+        assert_eq!(mapped_pages.len(), 8);
+
+        let snapshot = FileSnapshot::new(&path).unwrap();
+
+        let mut diff_count = 0;
+        for &gpa in expected_pages.iter() {
+            let mut orig = vec![0u8; 0x1000];
+            Snapshot::read_gpa(&snapshot, gpa, &mut orig).unwrap();
+            let mut modified = vec![0u8; 0x1000];
+            tracer.read_gpa(gpa, &mut &mut modified).unwrap();
+            let orig_hex = pretty_hex(&orig);
+            let modified_hex = pretty_hex(&modified);
+            let diff = Diff::new(&orig_hex, &modified_hex);
+            let diff_string = format!("{}", diff);
+            if !diff_string.is_empty() {
+                println!("diff for {:x}", gpa);
+                println!("{}", diff);
+                diff_count += 1;
+            }
+        }
+
+        assert_eq!(diff_count, 1);
+        let mapped_pages = tracer._get_dirty_pages().unwrap();
+        // FIXME: it should be 2 ...
+        assert_eq!(mapped_pages.len(), 0);
+    }
+
+
+    #[test]
+    fn test_trace_msr() {
+
+        let path = std::path::PathBuf::from("../examples/CVE-2020-17087/snapshots/17763.1.amd64fre.rs5_release.180914-1434/cng/ConfigIoHandler_Safeguarded");
+        let snapshot = FileSnapshot::new(&path).unwrap();
+
+        let context = trace::ProcessorState::load(path.join("context.json")).unwrap();
+
+        let return_address = snapshot.read_gva_u64(context.cr3, context.rsp).unwrap();
+
+        let mut tracer = KvmTracer::new(snapshot).unwrap();
+        
+        let mut params = trace::Params::default();
+        let mut hook = TestHook::default();
+
+        params.return_address = return_address;
+        params.save_context = true;
+
+        tracer.set_state(&context).unwrap();
+
+        tracer.enable_singlestep_on_branch();
+        // tracer.enable_singlestep();
+
+        let trace = tracer.run(&params, &mut hook).unwrap();
+        println!("trace lasted {:?}", trace.end.unwrap() - trace.start.unwrap());
+
+        let pagefaults = tracer.get_mapped_pages().unwrap();
+        println!("got {} pagefault(s)", pagefaults);
+        assert_eq!(pagefaults, 130);
+
+        let modified_pages = tracer.get_dirty_pages().unwrap();
+        assert_eq!(modified_pages.len(), 130);
+
+        assert_eq!(trace.seen.len(), 3176);
+        assert_eq!(trace.coverage.len(), 34174);
+
+        assert_eq!(trace.status, trace::EmulationStatus::Success);
+
+
+    }
+
 
 }

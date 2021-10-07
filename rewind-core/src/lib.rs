@@ -8,6 +8,7 @@
 #[macro_use]
 extern crate log;
 
+
 pub mod mem;
 pub mod watch;
 pub mod fuzz;
@@ -17,3 +18,6 @@ pub mod helpers;
 pub mod mutation;
 pub mod corpus;
 pub mod error;
+pub trait X64Snapshot: snapshot::Snapshot + mem::X64VirtualAddressSpace {
+
+}
