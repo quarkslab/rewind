@@ -12,7 +12,7 @@ libc = "0.2.101"
 thiserror = "1.0.23"
 
 nix = "0.17"
-userfaultfd = { path = "vendor/userfaultfd-rs" }
+userfaultfd = "0.3.2"
 rewind-core = { path = "../rewind-core" }
 rewind-snapshot = { path = "../rewind-snapshot" }
 
