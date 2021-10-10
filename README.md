@@ -139,11 +139,11 @@ Continue with the installation of bochs backend
 
 ### Bochs
 
-Clone bochscpu (https://github.com/erynian/bochscpu.git) repository in the ``vendor`` directory:
+Clone bochscpu (https://github.com/yrp604/bochscpu) repository in the ``vendor`` directory:
 
 ```
 $ cd vendor
-$ git clone https://github.com/erynian/bochscpu.git
+$ git clone https://github.com/yrp604/bochscpu
 ```
 
 Download the prebuilt bochs artifacts from bochscpu-build (https://github.com/yrp604/bochscpu-build)
