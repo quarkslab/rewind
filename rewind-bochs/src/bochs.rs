@@ -224,6 +224,7 @@ impl <S: Snapshot> hook::Hooks for BochsHooks <'_, S> {
     fn lin_access(&mut self, cpu_id: u32, vaddr: bochscpu::Address, gpa: bochscpu::Address, len: usize, _memty: hook::MemType, rw: hook::MemAccess) {
         let cpu = Cpu::from(cpu_id);
         let rip = unsafe { cpu.rip() };
+        let cr3 = unsafe { cpu.cr3() };
 
         // FIXME: push type
         // FIXME: need to push rip
@@ -231,18 +232,23 @@ impl <S: Snapshot> hook::Hooks for BochsHooks <'_, S> {
         // FIXME: need to show proper rip too
         if let Some(trace) = self.trace.as_mut() {
             let access_type = match rw {
-                
                 hook::MemAccess::Read => trace::MemAccessType::Read,
                 hook::MemAccess::Write => trace::MemAccessType::Write,
                 hook::MemAccess::Execute => trace::MemAccessType::Execute,
                 hook::MemAccess::RW => trace::MemAccessType::RW,
             };
 
+            // println!("reading gva: {:x} size: {:x}", vaddr, len);
+            // let (rip, _context) = trace.coverage.last().unwrap();
+            let mut data = vec![0u8; len];
+            guest_mem::virt_read_slice_checked(cr3, vaddr, &mut data).unwrap();
+     
             let access = trace::MemAccess {
                 rip,
                 vaddr,
                 size: len,
-                access_type
+                access_type,
+                data,
             };
 
             trace.mem_accesses.push(access);

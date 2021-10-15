@@ -913,6 +913,8 @@ pub struct MemAccess {
     pub size: usize,
     /// access_type
     pub access_type: MemAccessType,
+    /// data (read or written)
+    pub data: Vec<u8>,
 }
 
 /// Type of memory access

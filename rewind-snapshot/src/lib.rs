@@ -6,12 +6,11 @@
 //! Support full kernel dump and bitmap kernel dump
 
 
-use std::{io::{Read, Write, BufWriter}, sync::{Arc, Mutex}};
+use std::{io::{Read, Write, BufWriter}, sync::Mutex};
 
-use memmap::Mmap;
 use serde::{Serialize, Deserialize};
 
-use dump::{ParserError, RawDmp};
+use dump::ParserError;
 
 use rewind_core::{X64Snapshot, error::GenericError, snapshot::{Snapshot, SnapshotError}};
 use rewind_core::mem::{self, X64VirtualAddressSpace, VirtMemError};

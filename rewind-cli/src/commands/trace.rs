@@ -201,6 +201,7 @@ impl TracerRun {
             let mut bp_trace = tracer.run(&params, &mut hook)?;
             trace.seen.append(&mut bp_trace.seen);
             trace.coverage.append(&mut bp_trace.coverage);
+            trace.mem_accesses.append(&mut bp_trace.mem_accesses);
             trace.status = bp_trace.status;
             match trace.status {
                 trace::EmulationStatus::Breakpoint => {

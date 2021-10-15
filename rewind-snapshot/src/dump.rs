@@ -21,10 +21,6 @@ pub struct RawDmp <'a>{
 
 impl <'a> RawDmp <'a> {
 
-    pub fn parse_mapped_file(mmap: &'a memmap::Mmap) -> Result<Self, ParserError> {
-        Self::parse(mmap)
-    }
-
     pub fn parse(bytes: &'a [u8]) -> Result<Self, ParserError> {
         let (header, run_base) = LayoutVerified::<_, DmpHeader64>::new_from_prefix(bytes).ok_or_else(|| ParserError::ParseError("can't read header".into()))?;
         if header.signature != 0x4547_4150 {
