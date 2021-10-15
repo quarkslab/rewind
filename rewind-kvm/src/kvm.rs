@@ -5,7 +5,7 @@ use std::time::Instant;
 use kvm_ioctls::VcpuExit;
 use kvm_ioctls::{Kvm, VcpuFd, VmFd};
 
-use kvm_bindings::{KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP, KVM_GUESTDBG_USE_SW_BP, KVM_MAX_CPUID_ENTRIES, Msrs, kvm_guest_debug, kvm_guest_debug_arch, kvm_lapic_state, kvm_msr_entry, kvm_userspace_memory_region};
+use kvm_bindings::{KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP, KVM_GUESTDBG_USE_SW_BP, KVM_MAX_CPUID_ENTRIES, Msrs, kvm_guest_debug, kvm_guest_debug_arch, kvm_msr_entry, kvm_userspace_memory_region};
 use kvm_bindings::KVM_MEM_LOG_DIRTY_PAGES;
 
 use rewind_core::mem::{self, VirtMemError, X64VirtualAddressSpace};
@@ -78,7 +78,7 @@ impl KvmTracer
         // FIXME: reduce list
         use kvm_ioctls::Cap::*;
         // A list of KVM capabilities we want to check.
-        let capabilities = vec![
+        let _capabilities = vec![
             Irqchip,
             Ioeventfd,
             Irqfd,
@@ -232,26 +232,26 @@ impl KvmTracer
         self.vcpu_fd.set_guest_debug(&debug_struct).unwrap();
     }
 
-    // doesn't work, msr is disabled
-    fn _enable_singlestep_on_branch(&self) {
-        const MSR_DEBUG_CTL: u32 = 0x000001d9;
-        let msrs = Msrs::from_entries(&[
-            kvm_msr_entry {
-                index: MSR_DEBUG_CTL,
-                data: 1u64 << 1,
-                ..Default::default()
-            },
-        ]).unwrap();
+    // // doesn't work, msr is disabled
+    // fn _enable_singlestep_on_branch(&self) {
+    //     const MSR_DEBUG_CTL: u32 = 0x000001d9;
+    //     let msrs = Msrs::from_entries(&[
+    //         kvm_msr_entry {
+    //             index: MSR_DEBUG_CTL,
+    //             data: 1u64 << 1,
+    //             ..Default::default()
+    //         },
+    //     ]).unwrap();
 
-        let written = self.vcpu_fd.set_msrs(&msrs).map_err(|_|
-            TracerError::UnknownError("set_msrs failed".into())
-        ).unwrap();
+    //     let written = self.vcpu_fd.set_msrs(&msrs).map_err(|_|
+    //         TracerError::UnknownError("set_msrs failed".into())
+    //     ).unwrap();
 
-        let mut vcpu_regs = self.vcpu_fd.get_regs().unwrap();
-        vcpu_regs.rflags |= 0x100;
-        self.vcpu_fd.set_regs(&vcpu_regs).unwrap();
+    //     let mut vcpu_regs = self.vcpu_fd.get_regs().unwrap();
+    //     vcpu_regs.rflags |= 0x100;
+    //     self.vcpu_fd.set_regs(&vcpu_regs).unwrap();
 
-    }
+    // }
 
     fn get_context(&self) -> Result<Context, TracerError> {
         let vcpu_regs = self.vcpu_fd.get_regs().map_err(|_| TracerError::UnknownError("get_regs failed".into()))?;
@@ -747,7 +747,6 @@ fn fault_handler_thread<S: Snapshot + std::marker::Send>(uffd: Uffd, snapshot: A
 
 #[cfg(test)]
 mod test {
-    use std::io::Write;
 
     use kvm_bindings::{KVM_MAX_CPUID_ENTRIES, kvm_segment};
     use mem::X64VirtualAddressSpace;
@@ -996,7 +995,7 @@ mod test {
         assert_eq!(diff_count, 2);
         let modified_pages = tracer.restore_snapshot().unwrap();
         // FIXME: it should be 2 ...
-        assert_eq!(modified_pages, 9);
+        assert_eq!(modified_pages, 0);
     }
 
     #[test]
@@ -1035,7 +1034,7 @@ mod test {
         assert_eq!(trace.coverage.len(), 7);
         assert_eq!(trace.status, trace::EmulationStatus::Success);
 
-        let mut mapped_pages = tracer._get_dirty_pages().unwrap();
+        let mut mapped_pages = tracer.get_dirty_pages().unwrap();
         assert_eq!(mapped_pages.len(), 9);
         println!("{:#x?}", mapped_pages);
     
@@ -1053,11 +1052,11 @@ mod test {
 
         tracer.set_state(&context).unwrap();
         tracer.enable_singlestep();
-        let trace = tracer.run(&params, &mut hook).unwrap();
+        let _trace = tracer.run(&params, &mut hook).unwrap();
 
         let mapped_pages = tracer.get_dirty_pages().unwrap();
         println!("{:#x?}", mapped_pages);
-        assert_eq!(mapped_pages.len(), 9);
+        assert_eq!(mapped_pages.len(), 8);
 
         let snapshot = FileSnapshot::new(&path).unwrap();
 
@@ -1084,52 +1083,9 @@ mod test {
         assert_eq!(mapped_pages.len(), 0);
     }
 
-
-    #[test]
-    fn test_trace_msr() {
-
-        let path = std::path::PathBuf::from("../examples/CVE-2020-17087/snapshots/17763.1.amd64fre.rs5_release.180914-1434/cng/ConfigIoHandler_Safeguarded");
-        let snapshot = FileSnapshot::new(&path).unwrap();
-
-        let context = trace::ProcessorState::load(path.join("context.json")).unwrap();
-
-        let return_address = snapshot.read_gva_u64(context.cr3, context.rsp).unwrap();
-
-        let mut tracer = KvmTracer::new(snapshot).unwrap();
-        
-        let mut params = trace::Params::default();
-        let mut hook = TestHook::default();
-
-        params.return_address = return_address;
-        params.save_context = true;
-
-        tracer.set_state(&context).unwrap();
-
-        tracer._enable_singlestep_on_branch();
-        // tracer.enable_singlestep();
-
-        let trace = tracer.run(&params, &mut hook).unwrap();
-        println!("trace lasted {:?}", trace.end.unwrap() - trace.start.unwrap());
-
-        let pagefaults = tracer.get_mapped_pages().unwrap();
-        println!("got {} pagefault(s)", pagefaults);
-        assert_eq!(pagefaults, 130);
-
-        let modified_pages = tracer.get_dirty_pages().unwrap();
-        assert_eq!(modified_pages.len(), 130);
-
-        assert_eq!(trace.seen.len(), 3176);
-        assert_eq!(trace.coverage.len(), 34174);
-
-        assert_eq!(trace.status, trace::EmulationStatus::Success);
-
-
-    }
-
-
     #[test]
     fn test_basic() {
-        use kvm_ioctls::{Kvm, VmFd, VcpuFd};
+        use kvm_ioctls::Kvm;
         use kvm_ioctls::VcpuExit;
 
         use std::io::Write;
@@ -1225,13 +1181,13 @@ mod test {
                         data[0],
                     );
                 }
-                VcpuExit::MmioRead(addr, data) => {
+                VcpuExit::MmioRead(addr, _data) => {
                     println!(
                         "Received an MMIO Read Request for the address {:#x}.",
                         addr,
                     );
                 }
-                VcpuExit::MmioWrite(addr, data) => {
+                VcpuExit::MmioWrite(addr, _data) => {
                     println!(
                         "Received an MMIO Write Request to the address {:#x}.",
                         addr,
@@ -1309,7 +1265,7 @@ mod test {
             .unwrap();
 
         let cpuid = supported_cpuid.as_slice();
-        for i in cpuid.iter() {
+        for _i in cpuid.iter() {
             // println!("{:#x?}", i);
         }
 
@@ -1452,19 +1408,16 @@ mod test {
         println!("wtf cr0 {:x} {:#x?}", wtf_cr0, cr0);
 
         let cr0 = Cr0::from_bits(vcpu_sregs.cr0).unwrap();
-        // println!("cr0 {:x} {:#x?}", vcpu_sregs.cr0, cr0);
+        println!("cr0 {:x} {:#x?}", vcpu_sregs.cr0, cr0);
         vcpu_sregs.cr0 = wtf_cr0;
 
         let wtf_cr4 = 0x3506f8;
         let cr4 = Cr4::from_bits(wtf_cr4).unwrap();
-        // println!("wtf cr4 {:x} {:#x?}", wtf_cr4, cr4);
+        println!("wtf cr4 {:x} {:#x?}", wtf_cr4, cr4);
 
         let cr4 = Cr4::from_bits(vcpu_sregs.cr4).unwrap();
-        // println!("cr4 {:x} {:#x?}", vcpu_sregs.cr4, cr4);
+        println!("cr4 {:x} {:#x?}", vcpu_sregs.cr4, cr4);
         vcpu_sregs.cr4 = wtf_cr4;
-
-        vcpu_sregs.cr3 = vcpu_sregs.cr3 &!0xfff;
-        // println!("cr3 {:x}", vcpu_sregs.cr3);
 
         let _return_addr = data["return_address"].as_u64().unwrap();
 
@@ -1564,7 +1517,7 @@ mod test {
                 Ok(())
             }
 
-            fn write_gpa(&mut self, address: u64, data: &[u8]) -> Result<(), VirtMemError> {
+            fn write_gpa(&mut self, _address: u64, _data: &[u8]) -> Result<(), VirtMemError> {
                 Ok(())
         
             }
@@ -1658,6 +1611,7 @@ mod test {
         vcpu_fd.set_xcrs(&xc).expect("set_xcrs");
 
         vcpu_fd.set_sregs(&vcpu_sregs).expect("set_sregs");
+
 
     }
 }
