@@ -18,6 +18,8 @@ pub use rewind_kvm::KvmTracer;
 mod helpers;
 pub mod cli;
 
+mod commands;
+
 pub use crate::cli::Rewind;
 
 /// Supported backends
