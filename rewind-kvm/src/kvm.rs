@@ -11,7 +11,7 @@ use kvm_bindings::KVM_MEM_LOG_DIRTY_PAGES;
 use rewind_core::mem::{self, VirtMemError, X64VirtualAddressSpace};
 use rewind_core::snapshot::Snapshot;
 use rewind_core::X64Snapshot;
-use rewind_core::trace::{self, Context, CoverageMode, EmulationStatus, Params, ProcessorState, Trace, Tracer, TracerError};
+use rewind_core::trace::{self, Context, CoverageMode, EmulationStatus, Params, ProcessorState, Segment, Trace, Tracer, TracerError};
 
 const MSR_STAR: u32 = 0xC0000081;
 const MSR_LSTAR: u32 = 0xC0000082;
@@ -21,6 +21,10 @@ const MSR_FS_BASE: u32 = 0xC0000100;
 const MSR_GS_BASE: u32 = 0xC0000101;
 const MSR_KERNEL_GS_BASE: u32 = 0xC0000102;
 
+const MSR_APIC_BASE: u32 = 0x1b;
+const MSR_SYSENTER_CS: u32 = 0x174;
+const MSR_SYSENTER_ESP: u32 = 0x175;
+const MSR_SYSENTER_EIP: u32 = 0x176;
 
 /// Error
 #[derive(Debug, thiserror::Error)]
@@ -104,15 +108,15 @@ impl KvmTracer
         //     }
         // }
 
-        let max_memslots = kvm.get_nr_memslots();
-        println!("max_memslots: {:x}", max_memslots);
+        let _max_memslots = kvm.get_nr_memslots();
+        // println!("max_memslots: {:x}", max_memslots);
         let vm_fd = kvm.create_vm()?;
 
         vm_fd.create_irq_chip().map_err(KvmError::VmSetup)?;
 
-        println!("create vcpu");
+        // println!("create vcpu");
         let vcpu_fd = vm_fd.create_vcpu(0)?;
-        println!("created vcpu");
+        // println!("created vcpu");
 
         let supported_cpuid = kvm
             .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)?;
@@ -123,7 +127,7 @@ impl KvmTracer
 
         // FIXME: read this from snapshot
         let mem_size: u64 = 0xc * 1024 * 1024 * 1024;
-        println!("mem_size: {:x}", mem_size);
+        // println!("mem_size: {:x}", mem_size);
 
         let load_addr = unsafe {
             libc::mmap(
@@ -140,7 +144,7 @@ impl KvmTracer
             return Err(KvmError::KvmApiVersion(kvm.get_api_version()));
         }
 
-        println!("load addr: {:x?}", load_addr);
+        // println!("load addr: {:x?}", load_addr);
 
         let uffd = UffdBuilder::new()
         .close_on_exec(true)
@@ -154,7 +158,7 @@ impl KvmTracer
         state.lock().unwrap().base_address = load_addr as u64;
 
         // Create a thread that will process the userfaultfd events
-        println!("starting uffd thread");
+        // println!("starting uffd thread");
         let thread_state = state.clone();
 
         let snapshot = Arc::new(Mutex::new(snapshot));
@@ -174,7 +178,7 @@ impl KvmTracer
             flags: KVM_MEM_LOG_DIRTY_PAGES,
         };
 
-        println!("loading slot 0: {:x} - {:x}", mem_region.guest_phys_addr, mem_region.memory_size);
+        // println!("loading slot 0: {:x} - {:x}", mem_region.guest_phys_addr, mem_region.memory_size);
         unsafe { vm_fd.set_user_memory_region(mem_region)? };
 
         guest_addr += mem_region.memory_size + 0x1000;
@@ -191,7 +195,7 @@ impl KvmTracer
             flags: KVM_MEM_LOG_DIRTY_PAGES,
         };
 
-        println!("loading slot 1: {:x} - {:x}", mem_region.guest_phys_addr, mem_region.guest_phys_addr + mem_region.memory_size);
+        // println!("loading slot 1: {:x} - {:x}", mem_region.guest_phys_addr, mem_region.guest_phys_addr + mem_region.memory_size);
         unsafe { vm_fd.set_user_memory_region(mem_region)? };
 
         mem_regions.push(mem_region);
@@ -301,7 +305,6 @@ impl KvmTracer
                 }
             }
         }
-        // FIXME: will need snapshot to restore ...
 
         Ok(dirty_pages)
     }
@@ -315,7 +318,7 @@ impl KvmTracer
 impl Drop for KvmTracer {
 
     fn drop(&mut self) { 
-        println!("dropped");
+        // FIXME: close kvm fds?
     }
 
 }
@@ -394,19 +397,110 @@ pub fn kvm_segment_from_gdt(entry: u64, table_index: u8) -> kvm_bindings::kvm_se
 }
 
 impl Tracer for KvmTracer {
-    // FIXME: not finished
-    fn get_state(&mut self) -> Result<ProcessorState, TracerError> {
-        let mut state = ProcessorState::default();
-        let vcpu_sregs = self.vcpu_fd.get_sregs().map_err(|_| TracerError::UnknownError("get_sregs failed".into()))?;
-        state.cs.base = vcpu_sregs.cs.base;
 
+    // FIXME: not finished, need to convert flags for segment
+    fn get_state(&mut self) -> Result<ProcessorState, TracerError> {
+        let vcpu_sregs = self.vcpu_fd.get_sregs().map_err(|_| TracerError::UnknownError("get_sregs failed".into()))?;
         let vcpu_regs = self.vcpu_fd.get_regs().map_err(|_| TracerError::UnknownError("get_regs failed".into()))?;
-        state.rip = vcpu_regs.rip;
-        Ok(state)
+        let mut msrs = Msrs::from_entries(&[
+            kvm_msr_entry {
+                index: MSR_STAR,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: MSR_LSTAR,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: MSR_CSTAR,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: MSR_FS_BASE,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: MSR_GS_BASE,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: MSR_KERNEL_GS_BASE,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: MSR_SYSENTER_CS,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: MSR_SYSENTER_ESP,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: MSR_SYSENTER_EIP,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: MSR_APIC_BASE,
+                ..Default::default()
+            },
+        ]).unwrap();
+
+        self.vcpu_fd.get_msrs(&mut msrs).map_err(|_|
+            TracerError::UnknownError("get_msrs failed".into())
+        )?;
+
+        let slice = msrs.as_slice();
+
+        Ok(ProcessorState {
+            star: slice[0].data,
+            lstar: slice[1].data,
+            cstar: slice[2].data,
+            fs_base: slice[3].data,
+            gs_base: slice[4].data,
+            kernel_gs_base: slice[5].data,
+            sysenter_cs: slice[6].data,
+            sysenter_esp: slice[7].data,
+            sysenter_eip: slice[8].data,
+            apic_base: slice[9].data,
+            // FIXME: extract flags
+            cs: Segment { selector: vcpu_sregs.cs.selector, base: vcpu_sregs.cs.base, limit: vcpu_sregs.cs.limit, flags: 0 },
+            ss: Segment { selector: vcpu_sregs.ss.selector, base: vcpu_sregs.ss.base, limit: vcpu_sregs.ss.limit, flags: 0 },
+            ds: Segment { selector: vcpu_sregs.ds.selector, base: vcpu_sregs.ds.base, limit: vcpu_sregs.ds.limit, flags: 0 },
+            es: Segment { selector: vcpu_sregs.es.selector, base: vcpu_sregs.es.base, limit: vcpu_sregs.es.limit, flags: 0 },
+            fs: Segment { selector: vcpu_sregs.fs.selector, base: vcpu_sregs.fs.base, limit: vcpu_sregs.fs.limit, flags: 0 },
+            gs: Segment { selector: vcpu_sregs.gs.selector, base: vcpu_sregs.gs.base, limit: vcpu_sregs.gs.limit, flags: 0 },
+            cr0: vcpu_sregs.cr0,
+            cr3: vcpu_sregs.cr3,
+            cr4: vcpu_sregs.cr4,
+            cr8: vcpu_sregs.cr8,
+            efer: vcpu_sregs.efer,
+            gdtr: vcpu_sregs.gdt.base,
+            gdtl: vcpu_sregs.gdt.limit,
+            idtr: vcpu_sregs.idt.base,
+            idtl: vcpu_sregs.idt.limit,
+            rip: vcpu_regs.rip,
+            rax: vcpu_regs.rax,
+            rbx: vcpu_regs.rbx,
+            rcx: vcpu_regs.rcx,
+            rdx: vcpu_regs.rdx,
+            rsi: vcpu_regs.rsi,
+            rdi: vcpu_regs.rdi,
+            rsp: vcpu_regs.rsp,
+            rbp: vcpu_regs.rbp,
+            r8: vcpu_regs.r8,
+            r9: vcpu_regs.r9,
+            r10: vcpu_regs.r10,
+            r11: vcpu_regs.r11,
+            r12: vcpu_regs.r12,
+            r13: vcpu_regs.r13,
+            r14: vcpu_regs.r14,
+            r15: vcpu_regs.r15,
+            rflags: vcpu_regs.rflags,
+        })
+
     }
 
     fn set_state(&mut self, context: &ProcessorState) -> Result<(), TracerError> {
-        println!("set state");
         let msrs = Msrs::from_entries(&[
             kvm_msr_entry {
                 index: MSR_STAR,
@@ -440,11 +534,9 @@ impl Tracer for KvmTracer {
             },
         ]).unwrap();
 
-        let written = self.vcpu_fd.set_msrs(&msrs).map_err(|_|
+        let _written = self.vcpu_fd.set_msrs(&msrs).map_err(|_|
             TracerError::UnknownError("set_msrs failed".into())
         )?;
-
-        println!("wrote {} msr(s)", written);
 
         let mut vcpu_regs = self.vcpu_fd.get_regs().map_err(|_| TracerError::UnknownError("get_regs failed".into()))?;
         vcpu_regs.rax = context.rax;
@@ -636,9 +728,10 @@ impl Tracer for KvmTracer {
     }
 
     fn cr3(&mut self) -> Result<u64, TracerError> {
-        todo!()
+        Ok(self.snapshot.lock().unwrap().get_cr3())
     }
 
+    // FIXME: need to remove this
     fn singlestep<H: trace::Hook>(
         &mut self,
         _params: &Params,
@@ -647,8 +740,8 @@ impl Tracer for KvmTracer {
         todo!()
     }
 
-    fn add_breakpoint(&mut self, _address: u64) {
-        todo!()
+    fn add_breakpoint(&mut self, address: u64) {
+        self.state.lock().unwrap().breakpoints.push(address);
     }
 
     fn get_mapped_pages(&self) -> Result<usize, TracerError> {
@@ -1084,6 +1177,61 @@ mod test {
     }
 
     #[test]
+    fn test_dirty_log3() {
+
+        let path = std::path::PathBuf::from("../examples/CVE-2020-17087/snapshots/17763.1.amd64fre.rs5_release.180914-1434/cng/ConfigIoHandler_Safeguarded");
+        let snapshot = FileSnapshot::new(&path).unwrap();
+
+        let context = trace::ProcessorState::load(path.join("context.json")).unwrap();
+
+        let return_address = snapshot.read_gva_u64(context.cr3, context.rsp).unwrap();
+
+        let mut tracer = KvmTracer::new(snapshot).unwrap();
+        
+        let mut params = trace::Params::default();
+        let mut hook = TestHook::default();
+
+        params.return_address = return_address;
+        params.save_context = true;
+
+        tracer.set_state(&context).unwrap();
+
+        let trace = tracer.run(&params, &mut hook).unwrap();
+        println!("trace lasted {:?}", trace.end.unwrap() - trace.start.unwrap());
+
+        let pagefaults = tracer.get_mapped_pages().unwrap();
+        println!("got {} pagefault(s)", pagefaults);
+        assert_eq!(pagefaults, 130);
+
+        let modified_pages = tracer.get_dirty_pages().unwrap();
+        assert_eq!(modified_pages.len(), 130);
+
+        // WTF! modified pages number change ...
+        // got 130 pagefault(s)
+        // round 0
+        // modified pages 11
+        // round 1
+        // modified pages 8
+        // other rounds have 8
+        for i in 0..5 {
+            println!("round {}", i);
+            tracer.restore_snapshot().unwrap();
+
+            tracer.set_state(&context).unwrap();
+
+            let trace = tracer.run(&params, &mut hook).unwrap();
+            println!("trace lasted {:?}", trace.end.unwrap() - trace.start.unwrap());
+
+            let pagefaults = tracer.get_mapped_pages().unwrap();
+            assert_eq!(pagefaults, 130);
+
+            let modified_pages = tracer.get_dirty_pages().unwrap();
+            println!("modified pages {}", modified_pages.len());
+        }
+
+    }
+
+    #[test]
     fn test_basic() {
         use kvm_ioctls::Kvm;
         use kvm_ioctls::VcpuExit;
@@ -1252,7 +1400,7 @@ mod test {
 
     #[test]
     fn test_init_unicode_string() {
-        let file = std::fs::File::open("RtlInitUnicodeString.json").unwrap();
+        let file = std::fs::File::open("tests/RtlInitUnicodeString.json").unwrap();
         let data: serde_json::Value = serde_json::from_reader(file).unwrap();
         
         let kvm = Kvm::new().unwrap();
@@ -1274,10 +1422,6 @@ mod test {
         let vcpu_fd = vm.create_vcpu(0).unwrap();
 
         vcpu_fd.set_cpuid2(&supported_cpuid).unwrap();
-        // let cpuid = cpuid.as_slice();
-        // for _i in cpuid.iter() {
-        //     // println!("{:x}", _i.function);
-        // }
 
         let mut vcpu_sregs = vcpu_fd.get_sregs().unwrap();
 
@@ -1337,13 +1481,11 @@ mod test {
                 vcpu_sregs.idt.limit = value.as_u64().unwrap() as u16;
             } else if reg == "cs" {
                 let selector = value.as_u64().unwrap() as u16;
-                let flags = 0x209b;
+                let flags = 0x229b;
                 let base = 0;
                 let limit = 0;
                 let entry = gdt_entry(flags, base, limit);
                 vcpu_sregs.cs = kvm_segment_from_gdt(entry, (selector / 8) as u8);
-                vcpu_sregs.cs.type_ = 0x1b;
-                vcpu_sregs.cs.s = 0;
             } else if reg == "ss" {
                 let selector = value.as_u64().unwrap() as u16;
                 let flags = 0x493;
@@ -1351,8 +1493,6 @@ mod test {
                 let limit = 0;
                 let entry = gdt_entry(flags, base, limit);
                 vcpu_sregs.ss = kvm_segment_from_gdt(entry, (selector / 8) as u8);
-                vcpu_sregs.ss.type_ = 0x13;
-                vcpu_sregs.ss.s = 0;
             } else if reg == "ds" {
                 let selector = value.as_u64().unwrap() as u16;
                 let flags = 0xcf3;
@@ -1360,7 +1500,6 @@ mod test {
                 let limit = 0xffffffff;
                 let entry = gdt_entry(flags, base, limit);
                 vcpu_sregs.ds = kvm_segment_from_gdt(entry, (selector / 8) as u8);
-                vcpu_sregs.ds.type_ = 0x13;
             } else if reg == "es" {
                 let selector = value.as_u64().unwrap() as u16;
                 let flags = 0xcf3;
@@ -1368,7 +1507,6 @@ mod test {
                 let limit = 0xffffffff;
                 let entry = gdt_entry(flags, base, limit);
                 vcpu_sregs.es = kvm_segment_from_gdt(entry, (selector / 8) as u8);
-                vcpu_sregs.es.type_ = 0x13;
             } else if reg == "fs" {
                 let selector = value.as_u64().unwrap() as u16;
                 let flags = 0x4f3;
@@ -1376,7 +1514,6 @@ mod test {
                 let limit = 0x3c00;
                 let entry = gdt_entry(flags, base, limit);
                 vcpu_sregs.fs = kvm_segment_from_gdt(entry, (selector / 8) as u8);
-                vcpu_sregs.fs.type_ = 0x13;
             } else if reg == "gs" {
                 let selector = value.as_u64().unwrap() as u16;
                 let flags = 0xcf3;
@@ -1384,18 +1521,19 @@ mod test {
                 let limit = 0xffffffff;
                 let entry = gdt_entry(flags, base, limit);
                 vcpu_sregs.gs = kvm_segment_from_gdt(entry, (selector / 8) as u8);
-                vcpu_sregs.gs.type_ = 0x13;
             }
 
         }
 
-        vcpu_sregs.cs = kvm_segment {base: 0, limit: 4294967295, selector: 16, type_: 11, present:1, dpl:0, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
+        let kernel_gs_base = data["kpcr"].as_u64().unwrap();
 
-        vcpu_sregs.ds = kvm_segment {base: 0, limit: 4294967295, selector: 43, type_: 3, present:1, dpl:3, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
-        vcpu_sregs.es = kvm_segment {base: 0, limit: 4294967295, selector: 43, type_: 3, present:1, dpl:3, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
-        vcpu_sregs.fs = kvm_segment {base: 0, limit: 4294967295, selector: 83, type_: 3, present:1, dpl:3, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
-        vcpu_sregs.ss = kvm_segment {base: 0, limit: 4294967295, selector: 43, type_: 3, present:1, dpl:3, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
-        vcpu_sregs.gs = kvm_segment {base: 0xdfd9621000, limit: 4294967295, selector: 43, type_: 3, present:1, dpl:3, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
+        // vcpu_sregs.cs = kvm_segment {base: 0, limit: 0, selector: 16, type_: 11, present:1, dpl:0, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
+
+        // vcpu_sregs.ds = kvm_segment {base: 0, limit: 4294967295, selector: 43, type_: 3, present:1, dpl:3, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
+        // vcpu_sregs.es = kvm_segment {base: 0, limit: 4294967295, selector: 43, type_: 3, present:1, dpl:3, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
+        // vcpu_sregs.fs = kvm_segment {base: 0, limit: 4294967295, selector: 83, type_: 3, present:1, dpl:3, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
+        // vcpu_sregs.ss = kvm_segment {base: 0, limit: 4294967295, selector: 43, type_: 3, present:1, dpl:3, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
+        // vcpu_sregs.gs = kvm_segment {base: kernel_gs_base, limit: 4294967295, selector: 43, type_: 3, present:1, dpl:3, db:0, s:1, l:1, g:1, avl:0, padding: 0, unusable: 0};
         vcpu_sregs.tr = kvm_segment {base: 0xfffff8047375c000, limit: 103, selector: 64, type_: 11, present:1, dpl:0, db:0, s:0, l:0, g:0, avl:0, padding: 0, unusable: 0};
         vcpu_sregs.ldt = kvm_segment {base: 0, limit: 0, selector: 0, type_: 0, present:0, dpl:0, db:0, s:0, l:0, g:0, avl:0, padding: 0, unusable: 0};
 
@@ -1403,23 +1541,13 @@ mod test {
         vcpu_sregs.efer = efer;
         println!("efer {:x}", vcpu_sregs.efer);
 
-        let wtf_cr0 = 0x80050033;
-        let cr0 = Cr0::from_bits(wtf_cr0).unwrap();
-        println!("wtf cr0 {:x} {:#x?}", wtf_cr0, cr0);
-
         let cr0 = Cr0::from_bits(vcpu_sregs.cr0).unwrap();
         println!("cr0 {:x} {:#x?}", vcpu_sregs.cr0, cr0);
-        vcpu_sregs.cr0 = wtf_cr0;
-
-        let wtf_cr4 = 0x3506f8;
-        let cr4 = Cr4::from_bits(wtf_cr4).unwrap();
-        println!("wtf cr4 {:x} {:#x?}", wtf_cr4, cr4);
 
         let cr4 = Cr4::from_bits(vcpu_sregs.cr4).unwrap();
         println!("cr4 {:x} {:#x?}", vcpu_sregs.cr4, cr4);
-        vcpu_sregs.cr4 = wtf_cr4;
 
-        let _return_addr = data["return_address"].as_u64().unwrap();
+        let return_addr = data["return_address"].as_u64().unwrap();
 
         let entry = gdt_entry(0x8b, 0x1cadd000, 0x67);
         vcpu_sregs.tr = kvm_segment_from_gdt(entry, (0x40 / 8) as u8);
@@ -1428,12 +1556,13 @@ mod test {
         let entry = gdt_entry(0, 0, 0);
         vcpu_sregs.ldt = kvm_segment_from_gdt(entry, (0x0 / 8) as u8);
         // let mem_size = 0x706e9000usize;
-        let mem_size = 4429185024usize;
+
+        let mem_size: u64 = 0xc * 1024 * 1024 * 1024;
 
         let load_addr: *mut u8 = unsafe {
             libc::mmap(
                 null_mut(),
-                mem_size,
+                mem_size as usize,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_ANONYMOUS | libc::MAP_PRIVATE, // | libc::MAP_NORESERVE,
                 -1,
@@ -1550,7 +1679,7 @@ mod test {
         fpu.last_opcode = 0;
 
         // println!("{:#x?}", fpu);
-        vcpu_fd.set_fpu(&fpu).unwrap();
+        // vcpu_fd.set_fpu(&fpu).unwrap();
 
         // println!("{:#x?}", vcpu_sregs);
         let msrs = Msrs::from_entries(&[
@@ -1581,19 +1710,19 @@ mod test {
             },
             kvm_msr_entry {
                 index: MSR_KERNEL_GS_BASE,
-                data: 0xfffff8046b6f3000,
+                data: kernel_gs_base,
                 ..Default::default()
             },
-            kvm_msr_entry {
-                index: 0x277, //IA32_CR_PAT
-                data: 0x7010600070106,
-                ..Default::default()
-            },
-            kvm_msr_entry {
-                index: 0x1b,
-                data: 0xfee00900, // APIC_BASE
-                ..Default::default()
-            },
+            // kvm_msr_entry {
+            //     index: 0x277, //IA32_CR_PAT
+            //     data: 0x7010600070106,
+            //     ..Default::default()
+            // },
+            // kvm_msr_entry {
+            //     index: 0x1b,
+            //     data: 0xfee00900, // APIC_BASE
+            //     ..Default::default()
+            // },
         ]).unwrap();
 
         let written = vcpu_fd.set_msrs(&msrs).unwrap();
@@ -1608,10 +1737,34 @@ mod test {
         xc.flags = 0;
         xc.xcrs[0].value = 0x1;
         // println!("{:#x?}", xc);
-        vcpu_fd.set_xcrs(&xc).expect("set_xcrs");
+        // vcpu_fd.set_xcrs(&xc).expect("set_xcrs");
 
         vcpu_fd.set_sregs(&vcpu_sregs).expect("set_sregs");
 
+        let debug_struct = kvm_guest_debug {
+            // Configure the vcpu so that a KVM_DEBUG_EXIT would be generated
+            // when encountering a software breakpoint during execution
+            control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_SINGLESTEP,
+            ..Default::default()
+        };
+
+        vcpu_fd.set_guest_debug(&debug_struct).unwrap();
+
+        loop {
+            match vcpu_fd.run().expect("run failed") {
+                VcpuExit::Debug(d) => {
+                    println!("got exception {}, rip {:x}", d.exception, d.pc);
+                    if d.pc == return_addr {
+                        println!("got return address");
+                        break;
+                    } 
+                }
+                VcpuExit::Hlt => {
+                    break;
+                }
+                r => panic!("Unexpected exit reason: {:?}", r),
+            }
+        }
 
     }
 }
