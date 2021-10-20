@@ -2,6 +2,9 @@
 
 use std::fmt;
 use std::io::prelude::*;
+use std::num::ParseIntError;
+
+use color_eyre::Report;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Progress {
@@ -151,3 +154,28 @@ impl Progress {
 pub fn start() -> Progress {
     Progress::Section
 }
+
+pub (crate) fn parse_hex(input: &str) -> Result<usize, ParseIntError> {
+    usize::from_str_radix(input, 16)
+}
+
+pub (crate) fn decode_instruction(buffer: &[u8]) -> Result<zydis::DecodedInstruction, Report> {
+    let decoder = zydis::Decoder::new(zydis::MachineMode::LONG_64, zydis::AddressWidth::_64)?;
+    let result = decoder.decode(buffer)?;
+    if let Some(instruction) = result {
+        Ok(instruction)
+    } else {
+        Err(Report::msg("can't decode instruction".to_string()))
+    }
+}
+
+pub (crate) fn format_instruction(rip: u64, instruction: zydis::DecodedInstruction) -> Result<String, Report> {
+    let mut formatter = zydis::Formatter::new(zydis::FormatterStyle::INTEL)?;
+    formatter.set_property(zydis::FormatterProperty::HexUppercase(false))?;
+    let mut buffer = [0u8; 200];
+    let mut buffer = zydis::OutputBuffer::new(&mut buffer[..]);
+    formatter.format_instruction(&instruction, &mut buffer, Some(rip as u64), None)?;
+    let output = format!("{}", buffer);
+    Ok(output)
+}
+

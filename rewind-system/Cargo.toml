@@ -7,10 +7,10 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-pdb = "0.6.0"
-deku = "0.11.0"
-reqwest = { version = "0.10.9", features = ["blocking"] }
-thiserror = "1.0.22"
+pdb = "0.7.0"
+reqwest = { version = "0.11.4", features = ["blocking"] }
+thiserror = "1.0.29"
+zerocopy = "0.5.0"
 
 rewind-snapshot = { path = "../rewind-snapshot" }
 rewind-core = { path = "../rewind-core" }

@@ -26,6 +26,9 @@ chrono = "0.4.19"
 [target.'cfg(windows)'.dependencies]
 rewind-whvp = { path = "../rewind-whvp" }
 
+[target.'cfg(unix)'.dependencies]
+rewind-kvm = { path = "../rewind-kvm" }
+
 [[bin]]
 name = "rewind"
 doc = false

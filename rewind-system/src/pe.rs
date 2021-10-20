@@ -1,8 +1,9 @@
 
-use deku::prelude::*;
+use zerocopy::FromBytes;
 
 /// DOS header present in all PE binaries
-#[derive(Debug, Default, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug, Default)]
+#[repr(C)]
 pub struct ImageDosHeader {
     /// Magic number: 5a4d
     pub e_magic: u16,
@@ -30,7 +31,8 @@ pub struct ImageDosHeader {
 // pub const DOS_MAGIC: u16 = 0x5a4d;
 
 /// COFF Header
-#[derive(Debug, Default, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug, Default)]
+#[repr(C)]
 pub struct ImageFileHeader {
     /// The machine type
     pub machine: u16,
@@ -44,14 +46,16 @@ pub struct ImageFileHeader {
 
 // pub const PE_MAGIC: u32 = 0x0000_4550;
 
-#[derive(Debug, Default, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug, Default)]
+#[repr(C)]
 pub struct ImageNtHeaders64 {
     pub signature: u32,
     pub file_header: ImageFileHeader,
     pub optional_header: ImageOptionalHeader64
 }
 
-#[derive(Debug, Default, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug, Default)]
+#[repr(C)]
 pub struct ImageOptionalHeader64 {
     pub magic: u16,
     pub major_linker_version: u8,
@@ -82,25 +86,26 @@ pub struct ImageOptionalHeader64 {
     pub size_of_heap_commit: u64,
     pub loader_flags: u32,
     pub number_of_rva_and_sizes: u32,
-    #[deku(count="16")]
-    pub data_directories: Vec<ImageDataDirectory>
+    pub data_directories: [ImageDataDirectory; 16]
 }
 
-#[derive(Debug, Default, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug, Default)]
+#[repr(C)]
 pub struct ImageDataDirectory {
     pub virtual_address: u32,
     pub size: u32
 }
 
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct FileInformation {
     pub timestamp: u32,
     pub size: u32
 }
 
-impl From<ImageNtHeaders64> for FileInformation {
+impl From<&ImageNtHeaders64> for FileInformation {
 
-    fn from(header: ImageNtHeaders64) -> Self {
+    fn from(header: &ImageNtHeaders64) -> Self {
         Self {
             timestamp: header.file_header.time_date_stamp,
             size: header.optional_header.size_of_image,
@@ -138,7 +143,8 @@ impl From<DebugInformation> for (String, String) {
     }
 }
 
-#[derive(Debug, Default, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug, Default)]
+#[repr(C)]
 pub struct ImageDebugDirectory {
     pub characteristics: u32,
     pub time_date_stamp: u32,
@@ -150,7 +156,8 @@ pub struct ImageDebugDirectory {
     pub pointer_to_rawdata: u32
 }
 
-#[derive(Debug, Default, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug, Default, Clone)]
+#[repr(C)]
 pub struct Guid {
     pub data1: u32,
     pub data2: u16,
@@ -158,7 +165,8 @@ pub struct Guid {
     pub data4: [u8; 8]
 }
 
-#[derive(Debug, Default, DekuRead, DekuWrite)]
+#[derive(FromBytes, Debug, Default)]
+#[repr(C)]
 pub struct CodeView {
     pub signature: u32,
     pub guid: Guid,

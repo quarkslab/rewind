@@ -6,13 +6,13 @@
 //! Support full kernel dump and bitmap kernel dump
 
 
-use std::{cell::RefCell, io::{Read, Write, BufWriter}};
+use std::{io::{Read, Write, BufWriter}, sync::Mutex};
 
 use serde::{Serialize, Deserialize};
 
 use dump::ParserError;
 
-use rewind_core::{error::GenericError, snapshot::{Snapshot, SnapshotError}};
+use rewind_core::{X64Snapshot, error::GenericError, snapshot::{Snapshot, SnapshotError}};
 use rewind_core::mem::{self, X64VirtualAddressSpace, VirtMemError};
 
 mod dump;
@@ -20,7 +20,7 @@ mod dump;
 /// Dump-based snapshot
 pub struct DumpSnapshot <'a> {
     dump: dump::RawDmp<'a>,
-    pages: std::cell::RefCell<Vec<u64>>,
+    pages: Mutex<Vec<u64>>,
 }
 
 impl <'a> DumpSnapshot <'a> {
@@ -31,7 +31,7 @@ impl <'a> DumpSnapshot <'a> {
 
         let snapshot = DumpSnapshot {
             dump,
-            pages: std::cell::RefCell::new(Vec::new()),
+            pages: Mutex::new(Vec::new()),
         };
 
         Ok(snapshot)
@@ -52,7 +52,8 @@ impl <'a> DumpSnapshot <'a> {
         })?;
 
         let snapshot = FileSnapshot::new(path)?;
-        let pages: Vec<u64> = self.pages.borrow().iter().cloned().collect();
+        let pages = self.pages.lock().unwrap();
+        // let pages: Vec<u64> = self.pages.borrow().iter().cloned().collect();
         for page in pages.iter() {
             let mut data = vec![0u8; 0x1000];
             Snapshot::read_gpa(self, *page, &mut data)?;
@@ -76,7 +77,7 @@ impl <'a> Snapshot for DumpSnapshot <'a> {
         match self.dump.physmem.get(&base) {
             Some(b) => {
                 buffer[..size].clone_from_slice(&b[offset..offset+size]);
-                self.pages.borrow_mut().push(base);
+                self.pages.lock().unwrap().push(base);
             }
             None => {
                 return Err(SnapshotError::MissingPage(base))
@@ -107,6 +108,7 @@ impl <'a> X64VirtualAddressSpace for DumpSnapshot <'a> {
     }
 
 }
+
 /// User-controlled input
 #[derive(Default, Serialize, Deserialize, Debug)]
 pub struct SnapshotContext {
@@ -145,7 +147,7 @@ impl SnapshotContext {
 pub struct FileSnapshot {
     path: std::path::PathBuf,
     context: SnapshotContext,
-    cache: RefCell<mem::GpaManager>,
+    cache: Mutex<mem::GpaManager>,
 }
 
 impl FileSnapshot {
@@ -163,7 +165,7 @@ impl FileSnapshot {
         let context = SnapshotContext::load(path.join("snapshot.json"))
             .map_err(|e| { SnapshotError::GenericError(e.to_string()) })?;
 
-        let cache = RefCell::new(mem::GpaManager::new());
+        let cache = Mutex::new(mem::GpaManager::new());
         let file_snapshot = Self { path, context, cache };
         Ok(file_snapshot)
     }
@@ -187,9 +189,10 @@ impl Snapshot for FileSnapshot {
         let offset = (gpa & 0xfff) as usize;
 
         let mut data = [0u8; 0x1000];
-        let page_in_cache = self.cache.borrow().is_gpa_present(base);
+        let mut cache = self.cache.lock().unwrap();
+        let page_in_cache = cache.is_gpa_present(base);
         if page_in_cache {
-            self.cache.borrow().read_gpa(base, &mut data)
+            cache.read_gpa(base, &mut data)
                 .map_err(|e| SnapshotError::GenericError(e.to_string()))?;
             buffer.copy_from_slice(&data[offset..offset+buffer.len()]);
             return Ok(())
@@ -200,7 +203,7 @@ impl Snapshot for FileSnapshot {
         let mut fp = std::fs::File::open(path)?;
         fp.read_exact(&mut data)?;
         buffer.copy_from_slice(&data[offset..offset+buffer.len()]);
-        self.cache.borrow_mut().add_page(base, data);
+        cache.add_page(base, data);
 
         Ok(())
     }
@@ -212,6 +215,23 @@ impl Snapshot for FileSnapshot {
     fn get_module_list(&self) -> u64 {
         self.context.ps_loaded_module_list
     }
+}
+
+impl X64VirtualAddressSpace for FileSnapshot {
+
+    fn read_gpa(&self, gpa: mem::Gpa, buf: &mut [u8]) -> Result<(), VirtMemError> {
+        Snapshot::read_gpa(self, gpa, buf)
+            .map_err(|e| VirtMemError::GenericError(e.to_string()))
+    }
+
+    fn write_gpa(&mut self, _gpa: mem::Gpa, _data: &[u8]) -> Result<(), VirtMemError> {
+        Err(VirtMemError::GenericError("Read-only snapshot".to_string()))
+    }
+
+}
+
+impl X64Snapshot for FileSnapshot {
+
 }
 
 /// Available snapshots
@@ -244,7 +264,7 @@ impl <'a> Snapshot for SnapshotKind<'a> {
     fn read_gpa(&self, gpa: u64, buffer: &mut [u8]) -> Result<(), SnapshotError> {
         match self {
             Self::DumpSnapshot(snapshot) => Snapshot::read_gpa(snapshot, gpa, buffer),
-            Self::FileSnapshot(snapshot) => snapshot.read_gpa(gpa, buffer),
+            Self::FileSnapshot(snapshot) => Snapshot::read_gpa(snapshot, gpa, buffer),
         }
     }
 
@@ -277,6 +297,9 @@ impl <'a> X64VirtualAddressSpace for SnapshotKind<'a> {
     }
 }
 
+impl <'a> X64Snapshot for SnapshotKind<'a> {
+
+}
 
 impl From<ParserError> for SnapshotError {
 

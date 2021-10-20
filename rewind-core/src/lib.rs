@@ -17,3 +17,8 @@ pub mod helpers;
 pub mod mutation;
 pub mod corpus;
 pub mod error;
+
+/// Helper trait
+pub trait X64Snapshot: snapshot::Snapshot + mem::X64VirtualAddressSpace {
+
+}
