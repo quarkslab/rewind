@@ -37,7 +37,7 @@ impl Snapshot for TestSnapshot {
         let offset = (gpa & 0xfff) as usize;
 
         let mut data = vec![0u8; 0x1000];
-        let path = std::path::PathBuf::from(format!("../tests/fixtures/sdb/mem/{:016x}.bin", base));
+        let path = std::path::PathBuf::from(format!("tests/fixtures/sdb/mem/{:016x}.bin", base));
         let mut fp = std::fs::File::open(path).unwrap();
         fp.read_exact(&mut data).unwrap();
         buffer.copy_from_slice(&data[offset..offset+buffer.len()]);

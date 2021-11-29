@@ -264,7 +264,9 @@ mod tests {
     use super::*;
     use memmap::*;
 
+    // ignore tests for CI
     #[test]
+    #[ignore]
     fn test_bitmap_dmp() {
         let path = "../tests/ConfigIoHandler_Safeguarded/mem.dmp";
         let fp = std::fs::File::open(path).unwrap();
@@ -290,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_full_dmp() {
         let path = "../tests/_ConfigurationFunctionIoHandler/mem.dmp";
         let fp = std::fs::File::open(path).unwrap();

@@ -12,7 +12,7 @@ mod test {
     #[test]
     fn test_tracer_sdb() {
 
-        let path = std::path::PathBuf::from("../tests/fixtures/sdb");
+        let path = std::path::PathBuf::from("tests/fixtures/sdb");
         let snapshot = TestSnapshot::default();
 
         let mut tracer = BochsTracer::new(&snapshot);
