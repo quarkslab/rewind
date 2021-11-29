@@ -3,12 +3,14 @@ mod common;
 
 #[cfg(test)]
 mod test {
-    use std::io::Read;
+    use std::{fs::File, io::Read};
 
+    use flate2::read::GzDecoder;
     use rewind_bochs::BochsTracer;
     use rewind_core::{mem, trace::{self, Trace, Tracer}};
     use mem::X64VirtualAddressSpace;
     use rewind_snapshot::FileSnapshot;
+    use tar::Archive;
 
     use super::common::TestHook;
 
@@ -114,7 +116,14 @@ mod test {
         // fffff8051a3cc780 f644241001                      test byte ptr [rsp+0x10], 0x01
 
         let path = std::path::PathBuf::from("tests/fixtures/CVE-2020-17087");
+        let tar_gz = File::open(path.join("expected_with_crash.json.tar.gz")).unwrap();
+        let tar = GzDecoder::new(tar_gz);
+        let mut archive = Archive::new(tar);
+        archive.unpack(&path).unwrap();
+
         let expected = Trace::load(path.join("expected_with_crash.json")).unwrap();
+
+        std::fs::remove_file(path.join("expected_with_crash.json")).unwrap();
 
         assert_eq!(trace.seen.len(), expected.seen.len());
         assert_eq!(trace.coverage.len(), expected.coverage.len());

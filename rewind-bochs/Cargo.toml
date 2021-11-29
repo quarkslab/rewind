@@ -14,5 +14,7 @@ rewind-core = { path = "../rewind-core" }
 lazy_static = "1.4.0"
 
 [dev-dependencies]
+flate2 = "1.0.22"
 rewind-snapshot = { path = "../rewind-snapshot" }
+tar = "0.4.37"
 
