@@ -12,4 +12,5 @@
 #![allow(non_snake_case)]
 #![allow(improper_ctypes)]
 #![allow(clippy::all)] 
+#![allow(deref_nullptr)]
 include!(concat!(env!("OUT_DIR"), "/whvp_bindings.rs"));

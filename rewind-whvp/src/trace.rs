@@ -264,7 +264,7 @@ where S: Snapshot + mem::X64VirtualAddressSpace
     fn decode_instruction(&mut self, buffer: &[u8]) -> Result<zydis::DecodedInstruction, TracerError> {
         let decoder = zydis::Decoder::new(zydis::MachineMode::LONG_64, zydis::AddressWidth::_64)
             .map_err(|e| TracerError::UnknownError(e.to_string()))?;
-        let result = decoder.decode(&buffer)
+        let result = decoder.decode(buffer)
             .map_err(|e| TracerError::UnknownError(e.to_string()))?;
         if let Some(instruction) = result {
             Ok(instruction)
@@ -529,7 +529,7 @@ impl <'a, S: Snapshot + mem::X64VirtualAddressSpace> Tracer for WhvpTracer <'a, 
             match exit_context {
                 whvp::ExitContext::MemoryAccess(_vp_context, memory_access_context) => {
                     cancel = 0;
-                    match self.handle_memory_access(&params, &memory_access_context, &mut trace, hook) {
+                    match self.handle_memory_access(params, &memory_access_context, &mut trace, hook) {
                         Ok(_) => (),
                         Err(e) => {
                             let msg = format!("{}", e);
@@ -540,7 +540,7 @@ impl <'a, S: Snapshot + mem::X64VirtualAddressSpace> Tracer for WhvpTracer <'a, 
                 }
                 whvp::ExitContext::Exception(vp_context, exception_context) => {
                     cancel = 0;
-                    match self.handle_exception(&params, &vp_context, &exception_context, &mut trace, hook) {
+                    match self.handle_exception(params, &vp_context, &exception_context, &mut trace, hook) {
                         Ok(false) => {
                             break;
                         },
@@ -556,7 +556,7 @@ impl <'a, S: Snapshot + mem::X64VirtualAddressSpace> Tracer for WhvpTracer <'a, 
                     // FIXME: need a fn handle_msr_access
                     cancel = 0;
                     let rip = vp_context.Rip;
-                    trace!("got msr access: rip {:x}, write {}, number {:x} rax {:x} rdx {:x}",
+                    println!("got msr access: rip {:x}, write {}, number {:x} rax {:x} rdx {:x}",
                         rip,
                         msr_access_context.AccessInfo.IsWrite,
                         msr_access_context.MsrNumber,
@@ -592,6 +592,115 @@ impl <'a, S: Snapshot + mem::X64VirtualAddressSpace> Tracer for WhvpTracer <'a, 
         }
         trace.end = Some(Instant::now());
         Ok(trace)
+    }
+
+    fn run_with_trace<H: trace::Hook>(&mut self, params: &Params, hook: &mut H, trace: &mut Trace) -> Result<(), TracerError> {
+        let mut exits = 0;
+        let mut cancel = 0;
+
+        // let mut trace = Trace::new();
+
+        let mut regs = self.partition.get_regs()?;
+        let rip = unsafe { regs.rip.Reg64 };
+        // let cr3 = unsafe { regs.cr3.Reg64 };
+ 
+        // let breakpoints = self.breakpoints.clone();
+        // let _writes: Vec<_> = breakpoints.iter().map(|&addr| {
+        //     self.write_gva(cr3, addr, &[0xcc])
+        // }).collect();
+
+        if params.coverage_mode == CoverageMode::Instrs {
+            let rflags = unsafe { regs.rflags.Reg64 };
+            regs.rflags.Reg64 = rflags | 0x100;
+            self.partition.set_regs(&regs)?;
+        }
+
+        if params.coverage_mode != CoverageMode::Hit {
+            trace.seen.insert(rip);
+            if params.save_context {
+                let context = regs.into();
+                trace.coverage.push((rip, Some(context)));
+            } else {
+                trace.coverage.push((rip, None));
+            }
+        }
+
+        trace.start = Some(Instant::now());
+
+        while params.limit == 0 || exits < params.limit {
+            let exit = self.partition.run()?;
+            exits += 1;
+            if params.max_duration != Duration::default() && trace.start.unwrap().elapsed() > params.max_duration {
+                trace.status = EmulationStatus::Timeout;
+                break;
+            }
+            let exit_context: whvp::ExitContext = exit.into();
+            match exit_context {
+                whvp::ExitContext::MemoryAccess(_vp_context, memory_access_context) => {
+                    cancel = 0;
+                    match self.handle_memory_access(params, &memory_access_context, trace, hook) {
+                        Ok(_) => (),
+                        Err(e) => {
+                            let msg = format!("{}", e);
+                            trace.status = EmulationStatus::Error(msg);
+                            break;
+                        }
+                    }
+                }
+                whvp::ExitContext::Exception(vp_context, exception_context) => {
+                    cancel = 0;
+                    match self.handle_exception(params, &vp_context, &exception_context, trace, hook) {
+                        Ok(false) => {
+                            break;
+                        },
+                        Ok(true) => (),
+                        Err(e) => {
+                            let msg = format!("{}", e);
+                            trace.status = EmulationStatus::Error(msg);
+                            break;
+                        }
+                    }
+                }
+                whvp::ExitContext::X64MsrAccess(vp_context, msr_access_context) => {
+                    // FIXME: need a fn handle_msr_access
+                    cancel = 0;
+                    let rip = vp_context.Rip;
+                    println!("got msr access: rip {:x}, write {}, number {:x} rax {:x} rdx {:x}",
+                        rip,
+                        msr_access_context.AccessInfo.IsWrite,
+                        msr_access_context.MsrNumber,
+                        msr_access_context.Rax,
+                        msr_access_context.Rdx);
+
+                    let mut regs = self.partition.get_regs()?;
+                    regs.rip.Reg64 = rip + 2;
+                    self.partition.set_regs(&regs)?;
+
+                    trace.seen.insert(rip);
+                    if params.save_context {
+                        let context = regs.into();
+                        trace.coverage.push((rip, Some(context)));
+                    } else {
+                        trace.coverage.push((rip, None));
+                    }
+                }
+                whvp::ExitContext::Canceled(_, _) => {
+                    cancel += 1;
+                    if cancel > 10 {
+                        error!("stopping, seems stucked");
+                        trace.status = EmulationStatus::Timeout;
+                        break;
+                    }
+                }
+                _ => {
+                    let msg = format!("unhandled vm exit: {:?}", exit_context);
+                    trace.status = EmulationStatus::Error(msg);
+                    break;
+                }
+            }
+        }
+        trace.end = Some(Instant::now());
+        Ok(())
     }
 
     fn restore_snapshot(&mut self) -> Result<usize, TracerError> {
@@ -736,157 +845,3 @@ impl <'a, S: Snapshot> X64VirtualAddressSpace for WhvpTracer<'a, S> {
     }
 }
 
-mod test {
-    use std::io::Read;
-
-    #[cfg(test)]
-    use pretty_assertions::assert_eq;
-    
-    use mem::X64VirtualAddressSpace;
-
-    use super::*;
-
-    #[derive(Default)]
-    struct TestHook {
-
-    }
-
-    impl trace::Hook for TestHook {
-        fn setup<T: trace::Tracer>(&mut self, _tracer: &mut T) {
-
-        }
-
-        fn handle_breakpoint<T: trace::Tracer>(&mut self, _tracer: &mut T) -> Result<bool, trace::TracerError> {
-            todo!()
-        }
-
-        fn handle_trace(&self, _trace: &mut trace::Trace) -> Result<bool, trace::TracerError> {
-            Ok(true)
-        }
-
-        fn patch_page(&self, _: u64) -> bool {
-            todo!()
-        }
-    
-    }
-
-    #[derive(Default)]
-    struct TestSnapshot {
-
-    }
-
-    impl Snapshot for TestSnapshot {
-
-        fn read_gpa(&self, gpa: u64, buffer: &mut [u8]) -> Result<(), rewind_core::snapshot::SnapshotError> {
-            let base = gpa & !0xfff;
-            let offset = (gpa & 0xfff) as usize;
-            println!("reading {:x}, {:x}, {:x}", gpa, base, buffer.len());
-
-            let mut data = vec![0u8; 0x1000];
-            let path = std::path::PathBuf::from(format!("../tests/sdb/mem/{:016x}.bin", base));
-            let mut fp = std::fs::File::open(path).unwrap();
-            fp.read_exact(&mut data).unwrap();
-            buffer.copy_from_slice(&data[offset..offset+buffer.len()]);
-            Ok(())
-        }
-
-        fn get_cr3(&self) -> u64 {
-            todo!()
-        }
-
-        fn get_module_list(&self) -> u64 {
-            todo!()
-        }
-    }
-
-    impl X64VirtualAddressSpace for TestSnapshot {
-
-        fn read_gpa(&self, gpa: mem::Gpa, buf: &mut [u8]) -> Result<(), mem::VirtMemError> {
-            Snapshot::read_gpa(self, gpa, buf).map_err(|_e| mem::VirtMemError::MissingPage(gpa))
-        }
-
-        fn write_gpa(&mut self, _gpa: mem::Gpa, _data: &[u8]) -> Result<(), mem::VirtMemError> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn test_tracer() {
-
-        let path = std::path::PathBuf::from("../tests/sdb");
-        let snapshot = TestSnapshot::default();
-
-        let mut tracer = WhvpTracer::new(&snapshot).unwrap();
-        let context = trace::ProcessorState::load(path.join("context.json")).unwrap();
-        let mut params = trace::Params::default();
-        let mut hook = TestHook::default();
-        params.return_address = snapshot.read_gva_u64(context.cr3, context.rsp).unwrap();
-        params.coverage_mode = trace::CoverageMode::Instrs;
-        params.save_context = true;
-
-
-        tracer.set_state(&context).unwrap();
-        let trace = tracer.run(&params, &mut hook).unwrap();
-
-        let expected = Trace::load(path.join("trace.json")).unwrap();
-
-        for (index, (addr, context)) in expected.coverage.iter().enumerate() {
-            assert_eq!(*addr, trace.coverage[index].0);
-            if let Some(context) = context {
-                let expected_context = trace.coverage[index].1.as_ref().unwrap();
-                // rflags are different so they are not tested
-                assert_eq!(context.rax, expected_context.rax);
-                assert_eq!(context.rbx, expected_context.rbx);
-                assert_eq!(context.rcx, expected_context.rcx);
-                assert_eq!(context.rdx, expected_context.rdx);
-                assert_eq!(context.rsi, expected_context.rsi);
-                assert_eq!(context.rdi, expected_context.rdi);
-                assert_eq!(context.rsp, expected_context.rsp);
-                assert_eq!(context.rbp, expected_context.rbp);
-                assert_eq!(context.r8, expected_context.r8);
-                assert_eq!(context.r9, expected_context.r9);
-                assert_eq!(context.r10, expected_context.r10);
-                assert_eq!(context.r11, expected_context.r11);
-                assert_eq!(context.r12, expected_context.r12);
-                assert_eq!(context.r13, expected_context.r13);
-                assert_eq!(context.r14, expected_context.r14);
-                assert_eq!(context.r15, expected_context.r15);
-                assert_eq!(context.rip, expected_context.rip);
-                assert_eq!(*addr, expected_context.rip);
-
-            }
-
-            assert_eq!(expected.seen.contains(addr), true);
-            assert_eq!(trace.seen.contains(addr), true);
-
-        }
-
-        // FIXME: one off, why ?
-        // assert_eq!(expected.seen, trace.seen);
-
-        // FIXME: should be 2913
-        assert_eq!(trace.seen.len(), 2912);
-        assert_eq!(trace.coverage.len(), 59120);
-        assert_eq!(trace.immediates.len(), 0);
-        assert_eq!(trace.mem_accesses.len(), 0);
-
-        assert_eq!(trace.coverage[0].0, context.rip);
-
-        assert_eq!(trace.status, trace::EmulationStatus::Success);
-
-        let state = tracer.get_state().unwrap();
-
-        assert_eq!(state.rip, params.return_address);
-
-        let pages = tracer.get_mapped_pages().unwrap();
-
-        assert_eq!(pages, 80);
-
-        let modified = tracer.restore_snapshot().unwrap();
-        assert_eq!(modified, 35);
-
-    }
-
-    // FIXME: need to test singlestep, bp, hit tracing, read/write memory
-
-}

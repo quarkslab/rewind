@@ -494,14 +494,14 @@ fn replay_file<H: trace::Hook>(tx: &flume::Sender<Message>,
         }
     }
 
-    tracer.set_state(&context)?;
+    tracer.set_state(context)?;
 
     let mut hook = H::default();
     hook.setup(tracer);
 
     let start = Instant::now();
 
-    let mut trace = tracer.run(&trace_params, &mut hook)?;
+    let mut trace = tracer.run(trace_params, &mut hook)?;
 
     let end = Instant::now();
     let t = end - start;
@@ -563,7 +563,7 @@ fn update_coverage<S: Snapshot + X64VirtualAddressSpace>(workdir: &Path, system:
         }
 
         trace.save(workdir.join("traces").join(format!("{}.json", corpus_path.file_name().unwrap().to_str().unwrap())))?;
-        parse_trace(collection, &mut trace, &system, store)?;
+        parse_trace(collection, &mut trace, system, store)?;
     }
 
     Ok(())

@@ -18,3 +18,5 @@ whvp-sys = { path = "../whvp-sys" }
 
 [dev-dependencies]
 pretty_assertions = "0.6.1"
+rewind-snapshot = { path = "../rewind-snapshot" }
+
