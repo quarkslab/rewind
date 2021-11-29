@@ -1,5 +1,5 @@
 
-use std::{io::{BufWriter, Read, Write}, path::PathBuf, time::Instant};
+use std::{collections::{HashMap, HashSet}, io::{BufWriter, Read, Write}, path::PathBuf, str::FromStr, time::Instant};
 use std::fmt::Write as FmtWrite;
 
 use clap::Clap;
@@ -9,7 +9,7 @@ use rewind_core::{mem::X64VirtualAddressSpace, trace::{self, CoverageMode, Hook,
 use rewind_snapshot::{DumpSnapshot, FileSnapshot, SnapshotKind};
 use rewind_system::{PdbStore, System};
 use rewind_tui::{Collection, parse_trace};
-use crate::{Rewind, cli::Backend, helpers::{self, decode_instruction, format_instruction, parse_hex}};
+use crate::{Rewind, cli::Backend, helpers::{self, decode_instruction, format_instruction}};
 
 
 #[derive(Clap, Debug)]
@@ -25,7 +25,7 @@ impl Trace {
         match &self.subcmd {
             TraceSubCommand::Run(t) => t.run(cli),
             TraceSubCommand::Inspect(t) => t.run(),
-            TraceSubCommand::Info(t) => t.run(),
+            TraceSubCommand::Convert(t) => t.run(),
         }
     }
 }
@@ -34,7 +34,7 @@ impl Trace {
 enum TraceSubCommand {
     Run(TracerRun),
     Inspect(TracerInspect),
-    Info(TracerInfo),
+    Convert(TracerConvert),
 }
 
 
@@ -74,17 +74,13 @@ pub struct TracerRun {
     #[clap(long="coverage", possible_values(&["no", "instrs", "hit"]), default_value="no")]
     pub coverage: CoverageMode,
 
-    /// Input address in hexadecimal
-    #[clap(long="input-address", parse(try_from_str = parse_hex))]
-    pub input_address: Option<usize>,
-
-    /// Input size in hexadecimal
-    #[clap(long="input-size", parse(try_from_str = parse_hex))]
-    pub input_size: Option<usize>,
+    /// Input description
+    #[clap(long="input", parse(from_os_str))]
+    pub input: Option<PathBuf>,
 
     /// Input data
-    #[clap(long="input-data", parse(from_os_str))]
-    pub input_data: Option<PathBuf>,
+    #[clap(long="data", parse(from_os_str))]
+    pub data: Option<PathBuf>,
 
     /// Save input to file
     #[clap(long="save-input", parse(from_os_str))]
@@ -154,8 +150,11 @@ impl TracerRun {
         progress.single(format!("setting tracer initial state\n{}", &context));
         tracer.set_state(&context)?;
 
-        match (&self.input_address, &self.input_data) {
-            (Some(address), Some(filename)) => {
+        match (&self.input, &self.data) {
+            (Some(desc), Some(filename)) => {
+                let input_desc = rewind_core::mutation::InputDesc::load(desc)
+                    .wrap_err(format!("Can't load input description {}", desc.display()))?;
+
                 progress.single(format!("replaying input {:?}", filename));
 
                 let cr3 = context.cr3;
@@ -164,25 +163,36 @@ impl TracerRun {
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer)?;
 
-                progress.single(format!("writing input to {:x}", address));
-                Tracer::write_gva(&mut tracer, cr3, *address as u64, &buffer[..0x1000]).wrap_err("can't write fuzzer input")?;
+                for item in input_desc.items { 
+                    // FIXME: wrong
+                    let slice = &buffer[item.offset..item.offset+item.size];
+                    progress.single(format!("writing input ({:x} bytes) to {:x} (cr3 {:x})", slice.len(), item.address, cr3));
+                    Tracer::write_gva(&mut tracer, cr3, item.address, slice).wrap_err("can't write fuzzer input")?;
+                }
             }
-            (Some(address), None) => {
-                // FIXME: hardcoding first page for now
-                let size: u64 = 0x1000;
-                let mut data = vec![0u8; size as usize];
+            (Some(desc), None) => {
+                let input_desc = rewind_core::mutation::InputDesc::load(desc)
+                    .wrap_err(format!("Can't load input description {}", desc.display()))?;
+
+                // FIXME: compute needed size
+                let mut buffer = vec![0u8; 0x1000];
 
                 let cr3 = context.cr3;
-                Tracer::read_gva(&mut tracer, cr3, *address as u64, &mut data)?;
+                for item in input_desc.items { 
+                    progress.single(format!("reading input from {:x}", item.address));
+                    Tracer::read_gva(&mut tracer, cr3, item.address, &mut buffer[item.offset..item.offset+item.size]).wrap_err("can't read fuzzer input")?;
+                }
 
                 if let Some(path) = &self.save_input {
-                    progress.single(format!("saving input to {:?} ({:x})", path, size));
+                    progress.single(format!("saving input to {:?} ({:x})", path, buffer.len()));
                     let mut file = std::fs::File::create(path)?;
-                    file.write_all(&data)?;
+                    file.write_all(&buffer)?;
                 }
 
             }
-            _ => ()
+            _ => {
+                // progress.warn("--input or --data parameters incorrectly used, ignoring");
+            }
         }
 
         progress.single("running tracer");
@@ -255,11 +265,11 @@ impl TracerRun {
 #[derive(Clap, Debug)]
 pub struct TracerInspect {
     /// Snapshot path
-    #[clap(long, parse(from_os_str))]
+    #[clap(parse(from_os_str))]
     pub snapshot: PathBuf,
 
     /// Trace to load
-    #[clap(long, parse(from_os_str))]
+    #[clap(parse(from_os_str))]
     pub trace: PathBuf,
 
     /// Symbol store
@@ -512,34 +522,247 @@ impl TracerInspect {
 
 }
 
-/// Get basic info on a trace
+/// Trace formats
+#[derive(Debug)]
+pub enum TraceFormat {
+    /// Text
+    Text,
+    /// Tenet
+    Tenet,
+}
+
+impl FromStr for TraceFormat {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "txt" => Ok(Self::Text),
+            "tenet" => Ok(Self::Tenet),
+            _ => Err("no match"),
+        }
+    }
+}
+
+impl std::fmt::Display for TraceFormat {
+
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        match self {
+            Self::Text => {
+                f.write_str("txt")
+            },
+            Self::Tenet => {
+                f.write_str("tenet")
+            }
+        }
+    }
+}
+
+
+/// Convert trace
 #[derive(Clap, Debug)]
-pub struct TracerInfo {
+pub struct TracerConvert {
     /// Snapshot path
-    #[clap(long, parse(from_os_str))]
+    #[clap(parse(from_os_str))]
     pub snapshot: PathBuf,
 
     /// Trace to load
-    #[clap(long, parse(from_os_str))]
+    #[clap(parse(from_os_str))]
     pub trace: PathBuf,
+
+    /// Symbol store
+    #[clap(long="store", parse(from_os_str))]
+    pub store: PathBuf,
 
     /// Set the level of verbosity
     #[clap(long, short, parse(from_occurrences))]
     pub verbose: usize,
+
+    /// Save formatted trace to file
+    #[clap(long)]
+    pub output: Option<PathBuf>,
+
+    /// Output format
+    #[clap(long, possible_values(&["txt", "tenet"]), default_value="txt")]
+    pub format: TraceFormat,
 }
- 
-impl TracerInfo {
+
+impl TracerConvert {
 
     pub(crate) fn run(&self) -> Result<(), Report> {
         let progress = helpers::start();
-        let progress = progress.enter("Inspecting trace");
+        let progress = progress.enter("Converting trace");
 
+        progress.single("loading snapshot");
+        let buffer;
+
+        let snapshot = if self.snapshot.join("mem.dmp").exists() {
+            let dump_path = self.snapshot.join("mem.dmp");
+
+            let fp = std::fs::File::open(&dump_path).wrap_err(format!("Can't load snapshot {}", dump_path.display()))?;
+            buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+            let snapshot = DumpSnapshot::new(&buffer)?;
+            SnapshotKind::DumpSnapshot(snapshot)
+        } else {
+            let snapshot = FileSnapshot::new(&self.snapshot)?;
+            SnapshotKind::FileSnapshot(snapshot)
+        };
+
+        let context_path = self.snapshot.join("context.json");
+        let context = trace::ProcessorState::load(&context_path)?;
+ 
         progress.single("loading trace");
-        let trace = trace::Trace::load(&self.trace)?;
+        let mut trace = trace::Trace::load(&self.trace)?;
 
-        progress.single(format!("trace has {} instructions", trace.coverage.len()));
+        // FIXME: check if context is present
+        progress.single(format!("trace contains {} instructions ({} unique(s))", trace.coverage.len(), trace.seen.len()));
+
+        let path = &self.store;
+        if !path.exists() {
+            progress.warn("symbol store doesn't exist");
+
+            progress.single("creating symbol store directories");
+            std::fs::create_dir(&path)?;
+            std::fs::create_dir(path.join("binaries"))?;
+            std::fs::create_dir(path.join("symbols"))?;
+        }
+
+        let mut system = System::new(&snapshot)?;
+
+        let progress = progress.leave();
+        let progress = progress.enter("Analysing trace");
+
+        progress.single("loading modules");
+        system.load_modules()?;
+
+        let mut store = PdbStore::new(path)?;
+        let mut collection = Collection::new();
+
+        progress.single("parsing trace");
+        parse_trace(&mut collection, &mut trace, &system, &mut store)?;
+
+        progress.single(format!("trace has {} modules(s) and {} function(s)", collection.modules.len(), collection.functions.len()));
+
+        let mut out_writer = match &self.output {
+            Some(x) => {
+                Box::new(BufWriter::new(std::fs::File::create(x)?)) as Box<dyn Write>
+            }
+            None => Box::new(std::io::stdout()) as Box<dyn Write>,
+        };
+
+
+        match self.format {
+            TraceFormat::Text => {
+                let instructions = trace.coverage.iter()
+                .enumerate();
+
+                for (index, (addr, maybe_context)) in instructions {
+                    let mut bytes = vec![0u8; 16];
+                    system.snapshot.read_gva(context.cr3, *addr, &mut bytes)?;
+                    let instruction = decode_instruction(&bytes)?;
+                    let n = instruction.length as usize;
+                    let formatted_instruction = format_instruction(*addr, instruction)?;
+
+                    let mut formatted_bytes = String::with_capacity(2 * n);
+                    for byte in &bytes[..n] {
+                        write!(formatted_bytes, "{:02x}", byte)?;
+                    }
+                    
+                    let formatted_context = match maybe_context {
+                        Some(c) => format!("{}\n", c),
+                        None => format!("")
+                    };
+
+                    let text = match store.resolve_address(*addr) {
+                        Some(symbol) => {
+                            format!("instruction #{}:\n{}{}\n{:016x} {:<32}{:<20}\n", index, formatted_context, symbol, *addr, formatted_bytes, formatted_instruction)
+                        }
+                        None => {
+                            format!("instruction #{}:\n{}{:016x} {:<32}{:<20}\n", index, formatted_context, *addr, formatted_bytes, formatted_instruction)
+                        }
+                    };
+
+                    writeln!(out_writer, "{}", text)?;
+                }
+            }
+            TraceFormat::Tenet => {
+                let mut modules = HashSet::new();
+                let mut previous_context: Option<&trace::Context> = None;
+
+                let mut accesses = HashMap::new();
+                for access in trace.mem_accesses.iter() {
+                    accesses.insert(access.rip, access);
+                }
+
+                for (address, maybe_context) in trace.coverage.iter() {
+                    let context = maybe_context.as_ref().unwrap();
+                    if let Some(module) = system.get_module_by_address(*address) {
+                        if modules.insert(module) {
+                            // let text = format!("Loaded image: 0x{:x}:0x{:x} -> {}", module.base, module.base + module.size, module.name);
+                            // writeln!(out_writer, "{}", text)?;
+                        }
+                    }
+                    if let Some(previous_context) = previous_context {
+                        macro_rules! reg {
+                            ($($reg_name:ident),*) => {
+                                $(
+                                if previous_context.$reg_name != context.$reg_name {
+                                    let text = format!(concat!(stringify!($reg_name), "=0x{:x},"), context.$reg_name);
+                                    write!(out_writer, "{}", text)?;
+                                }
+                                )*
+                            }
+                        }
+                        reg!(rax,rbx,rcx,rdx,rsi,rdi,rsp,rbp);
+                        reg!(r8,r9,r10,r11,r12,r13,r14,r15);
+                    } else {
+                        macro_rules! reg {
+                            ($($reg_name:ident),*) => {
+                                $(
+                                let text = format!(concat!(stringify!($reg_name), "=0x{:x},"), context.$reg_name);
+                                write!(out_writer, "{}", text)?;
+                                )*
+                            }
+                        }
+                        reg!(rax,rbx,rcx,rdx,rsi,rdi,rsp,rbp);
+                        reg!(r8,r9,r10,r11,r12,r13,r14,r15);
+                    }
+
+                    let text = format!("rip=0x{:x}", context.rip);
+                    write!(out_writer, "{}", text)?;
+
+                    if let Some(&access) = accesses.get(address) {
+                        match access.access_type {
+                            trace::MemAccessType::Read => {
+                                let text = format!(",mr=0x{:x}:", access.vaddr);
+                                write!(out_writer, "{}", text)?;
+                            },
+                            trace::MemAccessType::Write => {
+                                let text = format!(",mr=0x{:x}:", access.vaddr);
+                                write!(out_writer, "{}", text)?;
+                            },
+                            trace::MemAccessType::Execute => {
+                                let text = format!(",mr=0x{:x}:", access.vaddr);
+                                write!(out_writer, "{}", text)?;
+                            },
+                            trace::MemAccessType::RW => {
+                                let text = format!(",mrw=0x{:x}:", access.vaddr);
+                                write!(out_writer, "{}", text)?;
+                            },
+                        }
+                        for byte in access.data.iter() {
+                            write!(out_writer, "{:02x}", byte)?;
+                        }
+                    }
+
+                    writeln!(out_writer)?;
+
+                    previous_context = Some(context);
+                }
+            }
+        }
 
         Ok(())
     }
 
 }
+

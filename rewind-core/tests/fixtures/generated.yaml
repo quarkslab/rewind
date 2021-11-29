@@ -1,0 +1,7 @@
+---
+fields:
+  - name: ""
+    offset: 0
+    type: U8
+    constraints: ~
+    ratio: ~

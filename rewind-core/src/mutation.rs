@@ -43,10 +43,8 @@ impl Strategy for BasicStrategy {
         if let Some((_hash, entry)) = corpus.rotate() {
             let data_len = data.len();
             data[..].copy_from_slice(&entry.data[..data_len]);
-            self.mutator.mutate(data);
-        } else {
-            self.mutator.mutate(data);
         }
+        self.mutator.mutate(data);
     }
 
     // FIXME: use coverage to change corpus choice strategy ?
@@ -108,12 +106,18 @@ impl Default for MutationHint {
     }
 }
 
-trait Field {
-
+/// Field
+pub trait Field {
+    /// Name
     fn name(&self) -> &str;
 
+    /// Offset
     fn offset(&self) -> usize;
 
+    /// Size
+    fn size(&self) -> usize;
+
+    /// Mutate
     fn mutate(&self, data: &mut [u8]);
 
 }
@@ -232,6 +236,10 @@ impl Field for U8 {
         self.offset
     }
 
+    fn size(&self) -> usize {
+        1
+    }
+
     fn mutate(&self, data: &mut [u8]) {
         if data.get(self.offset).is_none() {
             return
@@ -259,7 +267,6 @@ impl Field for U8 {
         let mut rng = thread_rng();
         if let Some(strategy) = STRATEGIES.choose(&mut rng) {
             strategy(self, data);
-            return
         }
     }
 }
@@ -418,6 +425,10 @@ impl Field for U16 {
         self.offset
     }
 
+    fn size(&self) -> usize {
+        2
+    }
+
     fn mutate(&self, data: &mut [u8]) {
         if data.get(self.offset..self.offset + 2).is_none() {
             return
@@ -446,7 +457,6 @@ impl Field for U16 {
         let mut rng = thread_rng();
         if let Some(strategy) = STRATEGIES.choose(&mut rng) {
             strategy(self, data);
-            return
         }
         
     }
@@ -607,6 +617,10 @@ impl Field for U32 {
         self.offset
     }
 
+    fn size(&self) -> usize {
+        4
+    }
+
     fn mutate(&self, data: &mut [u8]) {
         if data.get(self.offset..self.offset + 4).is_none() {
             return
@@ -635,7 +649,6 @@ impl Field for U32 {
         let mut rng = thread_rng();
         if let Some(strategy) = STRATEGIES.choose(&mut rng) {
             strategy(self, data);
-            return
         }
         
     }
@@ -795,6 +808,10 @@ impl Field for U64 {
         self.offset
     }
 
+    fn size(&self) -> usize {
+        8
+    }
+
     fn mutate(&self, data: &mut [u8]) {
         if data.get(self.offset..self.offset + 8).is_none() {
             return
@@ -823,33 +840,30 @@ impl Field for U64 {
         let mut rng = thread_rng();
         if let Some(strategy) = STRATEGIES.choose(&mut rng) {
             strategy(self, data);
-            return
         }
  
     }
 
 }
 
-struct PWStr {
+struct WStr {
     name: String,
     offset: usize,
-    value: u64,
     size: usize,
 
 }
 
-impl PWStr {
-    fn new(name: String, offset: usize, value: u64, size: usize) -> Self {
+impl WStr {
+    fn new(name: String, offset: usize, size: usize) -> Self {
         Self {
             name,
             offset,
-            value,
             size,
         }
     }
 }
 
-impl Field for PWStr {
+impl Field for WStr {
 
     fn name(&self) -> &str {
         &self.name
@@ -859,25 +873,29 @@ impl Field for PWStr {
         self.offset
     }
 
+    fn size(&self) -> usize {
+        self.size
+    }
+
     // FIXME: read orig as wstr
     // mutate some char
     // write mutated
     // same as u64, need several strategies
     fn mutate(&self, data: &mut [u8]) {
-        if data.get(self.offset..self.offset + 8).is_none() {
+        // if data.get(self.offset..self.offset + 8).is_none() {
+            // return
+        // }
+
+        // let bytes = u64::to_le_bytes(self.value);
+        // data[self.offset..self.offset+8].clone_from_slice(&bytes);
+
+        // let start = self.value as usize;
+
+        if data.get(self.offset).is_none() {
             return
         }
 
-        let bytes = u64::to_le_bytes(self.value);
-        data[self.offset..self.offset+8].clone_from_slice(&bytes);
-
-        let start = self.value as usize;
-
-        if data.get(start).is_none() {
-            return
-        }
-
-        let end = self.value as usize + 2 * (self.size + 1);
+        let end = self.offset as usize + 2 * (self.size + 1);
 
         if data.get(end).is_none() {
             return
@@ -892,7 +910,7 @@ impl Field for PWStr {
 
         let text: Vec::<u16> = rand_string.encode_utf16().collect();
         for (o, &b) in text.iter().enumerate() {
-            let offset = self.value as usize + o * 2;
+            let offset = self.offset as usize + o * 2;
             let bytes = u16::to_le_bytes(b);
             data[offset..offset + 2].clone_from_slice(&bytes);
         }
@@ -960,6 +978,10 @@ impl Field for Data {
         self.offset
     }
 
+    fn size(&self) -> usize {
+        self.size
+    }
+
     fn mutate(&self, data: &mut [u8]) {
         if data.get(self.offset..self.offset + self.size).is_none() {
             return
@@ -976,20 +998,19 @@ impl Field for Data {
         let mut rng = thread_rng();
         if let Some(strategy) = STRATEGIES.choose(&mut rng) {
             strategy(self, data);
-            return
         }
     }
 
 }
 
-#[allow(clippy::clippy::upper_case_acronyms)]
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Deserialize, Serialize)]
 enum FieldType {
     U8,
     U16,
     U32,
     U64,
-    PWSTR,
+    WSTR,
     DATA,
 
 }
@@ -1014,7 +1035,8 @@ struct FieldConstraint {
 /// Basic mutator
 #[derive(Default)]
 pub struct Mutator {
-    fields: Vec<Box<dyn Field>>,
+    /// Fields
+    pub fields: Vec<Box<dyn Field>>,
 
 }
 
@@ -1033,66 +1055,27 @@ impl Mutator {
             return
         }
 
-        let mut rng = thread_rng();
-        let number_of_fields = self.fields.len();
-        let fields_to_mutate = if number_of_fields == 1 {
-            1
-        } else {
-            rng.gen_range(1..number_of_fields)
-        };
-        let fields = self.fields.choose_multiple(&mut rng, fields_to_mutate);
+        // let mut rng = thread_rng();
+        // let number_of_fields = self.fields.len();
+        // let fields_to_mutate = if number_of_fields == 1 {
+        //     1
+        // } else {
+        //     rng.gen_range(1..number_of_fields)
+        // };
+        // let fields = self.fields.choose_multiple(&mut rng, fields_to_mutate);
+        let fields = self.fields.iter();
         for f in fields {
+            // FIXME: mutation threshold
             f.mutate(data);
         }
 
     }
-}
 
-#[derive(Default, Debug, Deserialize, Serialize)]
-struct FieldDesc {
-    name: String,
-    offset: usize,
-    r#type: FieldType,
-    constraints: Option<FieldConstraint>,
-    ratio: Option<f64>,
-}
-
-/// Describe input layout
-#[derive(Default, Debug, Deserialize, Serialize)]
-pub struct StructDesc {
-    fields: Vec<FieldDesc>,
-
-}
-
-impl StructDesc {
-
-    /// Serialize to json and save to disk
-    pub fn save<P>(&self, path: P) -> Result<(), crate::error::GenericError>
-    where P: AsRef<std::path::Path>
-    {
-        let mut fp = BufWriter::new(std::fs::File::create(&path)?);
-        let data = serde_yaml::to_vec(&self)?;
-        fp.write_all(&data)?;
-        Ok(())
-    }
-
-    /// Load from disk and deserialize
-    pub fn load<P>(path: P) -> Result<Self, crate::error::GenericError>
-    where P: AsRef<std::path::Path>
-    {
-        let input_str = std::fs::read_to_string(&path)?;
-        let input = serde_yaml::from_str(&input_str)?;
-        Ok(input)
-    }
-
-}
-
-impl TryFrom<StructDesc> for Mutator {
-    type Error = GenericError;
-
-    fn try_from(value: StructDesc) -> Result<Self, Self::Error> {
+    /// Constructor from field description
+    pub fn from(value: &[FieldDesc]) -> Result<Self, GenericError> {
         let mut fuzzed = Self::default();
-        for desc in value.fields.iter() {
+        // FIXME: need to check in field size are correct with regards to the corpus size
+        for desc in value.iter() {
             match desc.r#type {
                 FieldType::DATA => {
                     if let Some(constraints) = desc.constraints.as_ref() {
@@ -1106,13 +1089,13 @@ impl TryFrom<StructDesc> for Mutator {
                         return Err(GenericError::Generic("missing constraints".to_string()))
                     }
                 }
-                FieldType::PWSTR => {
+                FieldType::WSTR => {
                     if let Some(constraints) = desc.constraints.as_ref() {
-                        if let (Some(value), Some(size)) = (constraints.value, constraints.size) {
-                            let field = PWStr::new(desc.name.clone(), desc.offset, value as u64, size);
+                        if let Some(size) = constraints.size {
+                            let field = WStr::new(desc.name.clone(), desc.offset, size);
                             fuzzed.add_field(field);
                         } else {
-                            return Err(GenericError::Generic("missing value and size in constraints".to_string()))
+                            return Err(GenericError::Generic("missing size in constraints".to_string()))
                         }
                     } else {
                         return Err(GenericError::Generic("missing constraints".to_string()))
@@ -1140,6 +1123,148 @@ impl TryFrom<StructDesc> for Mutator {
     }
 }
 
+/// Describe field mutation
+#[derive(Default, Debug, Deserialize, Serialize)]
+pub struct FieldDesc {
+    /// Name
+    pub name: String,
+    /// Offset
+    pub offset: usize,
+    r#type: FieldType,
+    constraints: Option<FieldConstraint>,
+    ratio: Option<f64>,
+}
+
+/// Describe input layout
+#[derive(Default, Debug, Deserialize, Serialize)]
+pub struct StructDesc {
+    /// Input fields
+    pub fields: Vec<FieldDesc>,
+
+}
+
+impl StructDesc {
+
+    /// Serialize to json and save to disk
+    pub fn save<P>(&self, path: P) -> Result<(), crate::error::GenericError>
+    where P: AsRef<std::path::Path>
+    {
+        let mut fp = BufWriter::new(std::fs::File::create(&path)?);
+        let data = serde_yaml::to_vec(&self)?;
+        fp.write_all(&data)?;
+        Ok(())
+    }
+
+    /// Load from disk and deserialize
+    pub fn load<P>(path: P) -> Result<Self, crate::error::GenericError>
+    where P: AsRef<std::path::Path>
+    {
+        let input_str = std::fs::read_to_string(&path)?;
+        let input = serde_yaml::from_str(&input_str)?;
+        Ok(input)
+    }
+
+}
+
+impl TryFrom<Vec<FieldDesc>> for Mutator {
+    type Error = GenericError;
+
+    fn try_from(value: Vec<FieldDesc>) -> Result<Self, Self::Error> {
+        let mut fuzzed = Self::default();
+        for desc in value.iter() {
+            match desc.r#type {
+                FieldType::DATA => {
+                    if let Some(constraints) = desc.constraints.as_ref() {
+                        if let Some(size) = constraints.size {
+                            let field = Data::new(desc.name.clone(), desc.offset, size);
+                            fuzzed.add_field(field);
+                        } else {
+                            return Err(GenericError::Generic("missing size in constraints".to_string()))
+                        }
+                    } else {
+                        return Err(GenericError::Generic("missing constraints".to_string()))
+                    }
+                }
+                FieldType::WSTR => {
+                    if let Some(constraints) = desc.constraints.as_ref() {
+                        if let Some(size) = constraints.size {
+                            let field = WStr::new(desc.name.clone(), desc.offset, size);
+                            fuzzed.add_field(field);
+                        } else {
+                            return Err(GenericError::Generic("missing size in constraints".to_string()))
+                        }
+                    } else {
+                        return Err(GenericError::Generic("missing constraints".to_string()))
+                    }
+                }
+                FieldType::U8 => {
+                    let field = U8::new(desc.name.clone(), desc.offset, desc.constraints.clone());
+                    fuzzed.add_field(field);
+                }
+                FieldType::U16 => {
+                    let field = U16::new(desc.name.clone(), desc.offset, desc.constraints.clone());
+                    fuzzed.add_field(field);
+                }
+                FieldType::U32 => {
+                    let field = U32::new(desc.name.clone(), desc.offset, desc.constraints.clone());
+                    fuzzed.add_field(field);
+                }
+                FieldType::U64 => {
+                    let field = U64::new(desc.name.clone(), desc.offset, desc.constraints.clone());
+                    fuzzed.add_field(field);
+                }
+            };
+        }
+        Ok(fuzzed)
+    }
+}
+
+/// Description of input
+#[derive(Default, Debug, Deserialize, Serialize)]
+pub struct InputItemDesc {
+    /// Name
+    pub name: String,
+    /// Address
+    pub address: u64,
+    /// Offset in file
+    pub offset: usize,
+    /// Size
+    pub size: usize,
+    /// Fields
+    pub fields: Vec<FieldDesc>,
+}
+
+/// Describe input layout
+#[derive(Default, Debug, Deserialize, Serialize)]
+pub struct InputDesc {
+    /// List of inputs
+    pub items: Vec<InputItemDesc>,
+}
+
+impl InputDesc {
+
+    /// Serialize to yaml and save to disk
+    pub fn save<P>(&self, path: P) -> Result<(), crate::error::GenericError>
+    where P: AsRef<std::path::Path>
+    {
+        let mut fp = BufWriter::new(std::fs::File::create(&path)?);
+        let data = serde_yaml::to_vec(&self)?;
+        fp.write_all(&data)?;
+        Ok(())
+    }
+
+    /// Load from disk and deserialize from yaml
+    pub fn load<P>(path: P) -> Result<Self, crate::error::GenericError>
+    where P: AsRef<std::path::Path>
+    {
+        let input_str = std::fs::read_to_string(&path)?;
+        let input = serde_yaml::from_str(&input_str)?;
+        Ok(input)
+    }
+
+}
+
+
 #[cfg(test)]
 mod test {
     use crate::mutation::*;
@@ -1152,22 +1277,22 @@ mod test {
 
     #[test]
     fn test_parse_yaml() {
-        let path = "../tests/test.yaml";
+        let path = "tests/fixtures/test.yaml";
         let desc = StructDesc::load(path).unwrap();
         dbg!(&desc);
-        assert_eq!(desc.fields.len(), 11);
+        assert_eq!(desc.fields.len(), 12);
 
         assert_eq!(desc.fields[0].name, "magic");
     }
 
     #[test]
     fn test_from_yaml() {
-        let path = "../tests/test.yaml";
+        let path = "tests/fixtures/test.yaml";
         let desc = StructDesc::load(path).unwrap();
 
         let mut buffer = vec![0u8; 0x100];
 
-        let mut fuzzed: Mutator = desc.try_into().unwrap();
+        let mut fuzzed: Mutator = desc.fields.try_into().unwrap();
         fuzzed.mutate(&mut buffer);
 
         use pretty_hex::*;
@@ -1260,13 +1385,13 @@ mod test {
     fn test_mutate_wstr() {
         let mut buffer = vec![0u8; 0x10];
 
-        let f = PWStr::new("test".to_string(), 4, 4, 4);
+        let f = WStr::new("test".to_string(), 4, 4);
 
         for _ in 0..0x100 {
             f.mutate(&mut buffer);
         }
 
-        let f = PWStr::new("test".to_string(), 0x20, 4, 4);
+        let f = WStr::new("test".to_string(), 0x20, 4);
 
         for _ in 0..0x100 {
             let checksum = compute_checksum(&buffer);
@@ -1296,7 +1421,7 @@ mod test {
 
     #[test]
     fn test_parse_yaml2() {
-        let path = "../tests/test2.yaml";
+        let path = "tests/fixtures/test2.yaml";
         let desc = StructDesc::load(path).unwrap();
         dbg!(&desc);
         assert_eq!(desc.fields.len(), 1);
@@ -1310,7 +1435,7 @@ mod test {
         let field = FieldDesc::default();
         desc.fields.push(field);
 
-        let path = "../tests/generated.yaml";
+        let path = "tests/fixtures/generated.yaml";
         desc.save(path).unwrap();
 
         assert_eq!(desc.fields.len(), 1);

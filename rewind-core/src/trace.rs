@@ -839,6 +839,9 @@ pub trait Tracer {
     /// Run tracer
     fn run<'a, H: Hook>(&'a mut self, params: &'a Params, hook: &'a mut H) -> Result<Trace, TracerError>;
 
+    /// Run tracer with trace
+    fn run_with_trace<'a, H: Hook>(&'a mut self, params: &'a Params, hook: &'a mut H, trace: &mut Trace) -> Result<(), TracerError>;
+
     /// Restore modified pages
     fn restore_snapshot(&mut self) -> Result<usize, TracerError>;
 

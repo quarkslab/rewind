@@ -147,7 +147,7 @@ impl Progress {
     }
 
     pub fn single<D: fmt::Display>(&self, name: D) {
-        self.clone().enter(name).leave();
+        self.enter(name).leave();
     }
 }
 

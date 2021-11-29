@@ -22,6 +22,7 @@ indicatif = "0.15.0"
 memmap = "0.7.0"
 flume = "0.10.0"
 chrono = "0.4.19"
+colored = "2.0.0"
 
 [target.'cfg(windows)'.dependencies]
 rewind-whvp = { path = "../rewind-whvp" }

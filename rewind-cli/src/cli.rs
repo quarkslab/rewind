@@ -9,7 +9,7 @@ use rewind_core::{mutation, snapshot, trace::{self, Tracer, TracerError}};
 use rewind_core::mem::{X64VirtualAddressSpace, VirtMemError};
 use rewind_core::fuzz;
 
-use crate::commands::{Trace, Snapshot, FuzzCommand};
+use crate::commands::{FuzzCommand, Mutation, Snapshot, Trace};
 
 /// Backend
 #[allow(clippy::large_enum_variant)]
@@ -61,6 +61,16 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
         }
     }
 
+    fn run_with_trace<H: trace::Hook>(&mut self, params: &trace::Params, hook: &mut H, trace: &mut trace::Trace) -> Result<(), TracerError> {
+        match self {
+            #[cfg(windows)]
+            Self::Whvp(tracer) => tracer.run_with_trace(params, hook, trace),
+            Self::Bochs(tracer) => tracer.run_with_trace(params, hook, trace),
+            #[cfg(unix)]
+            Self::Kvm(tracer) => tracer.run_with_trace(params, hook, trace),
+        }
+    }
+
     fn restore_snapshot(&mut self) -> Result<usize, TracerError> {
         match self {
             #[cfg(windows)]
@@ -74,8 +84,8 @@ where S: snapshot::Snapshot + X64VirtualAddressSpace {
     fn read_gva(&mut self, cr3: u64, vaddr: u64, data: &mut [u8]) -> Result<(), TracerError> {
         match self {
             #[cfg(windows)]
-            Self::Whvp(tracer) => tracer.read_gva(cr3, vaddr, data),
-            Self::Bochs(tracer) => tracer.read_gva(cr3, vaddr, data),
+            Self::Whvp(tracer) => Tracer::read_gva(tracer, cr3, vaddr, data),
+            Self::Bochs(tracer) => Tracer::read_gva(tracer, cr3, vaddr, data),
             #[cfg(unix)]
             Self::Kvm(tracer) => tracer.read_gva(cr3, vaddr, data),
         }
@@ -198,10 +208,9 @@ pub trait Rewind {
 }
 
 
-/// Rewind
-///
 /// PoC for a snapshot-based coverage-guided fuzzer targeting Windows kernel components.
 #[derive(Clap, Debug)]
+#[clap(name="rewind", version="0.1.0")]
 struct RewindArgs {
     #[clap(subcommand)]
     subcmd: SubCommand,
@@ -209,14 +218,15 @@ struct RewindArgs {
 }
 
 impl RewindArgs {
-    
+
 }
 
 #[derive(Clap, Debug)]
 enum SubCommand {
     Snapshot(Snapshot),
     Trace(Trace),
-    Fuzz(FuzzCommand)
+    Fuzz(FuzzCommand),
+    Mutate(Mutation)
 }
 
 /// CLI
@@ -234,10 +244,12 @@ impl Cli {
     /// Command dispatcher
     pub fn run(&self) -> Result<(), Report> {
         let args = RewindArgs::parse();
+        // FIXME: use args.run
         match &args.subcmd {
             SubCommand::Snapshot(t) => t.run(),      
             SubCommand::Trace(t) => t.run(self),
             SubCommand::Fuzz(t) => t.run(self),
+            SubCommand::Mutate(t) => t.run(),
         }
     }
 }

@@ -1,0 +1,8 @@
+
+fields:
+  - name: data
+    offset: 8
+    type: DATA
+    constraints:
+      size: 0x100
+

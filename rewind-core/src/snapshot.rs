@@ -15,7 +15,7 @@ pub enum SnapshotError {
     MissingPage(u64),
 
     /// IO error
-    #[error("File error: {:?}", .0)]
+    #[error(transparent)]
     FileError(#[from]std::io::Error)
 
 }

@@ -22,7 +22,7 @@ impl Fuzz {
     pub(crate) fn run<C: Rewind>(&self, cli: &C) -> Result<(), Report> {
         match &self.subcmd {
             FuzzerSubCommand::Init(t) => t.run(),
-            FuzzerSubCommand::Run(t) => t.run(cli),
+            FuzzerSubCommand::Run(t) => t.run2(cli),
             FuzzerSubCommand::Monitor(t) => t.run(cli),
         }
     }
@@ -48,13 +48,13 @@ pub struct FuzzerInit {
     #[clap(parse(from_os_str))]
     pub snapshot: std::path::PathBuf,
 
-    /// Input address
-    #[clap(long="input-address")]
-    pub input_address: String,
+    // /// Input address
+    // #[clap(long="input-address")]
+    // pub input_address: String,
 
-    /// Input size
-    #[clap(long="input-size")]
-    pub input_size: String,
+    // /// Input size
+    // #[clap(long="input-size")]
+    // pub input_size: String,
 
 }
 
@@ -64,7 +64,7 @@ impl FuzzerInit {
         let progress = helpers::start();
         let progress = progress.enter("Init fuzzer");
 
-        progress.single("checking parameters");
+        progress.single("Checking parameters");
 
         let path = &self.workdir;
         if path.exists() {
@@ -73,23 +73,23 @@ impl FuzzerInit {
 
         let mut fuzz_params = fuzz::Params::default();
 
-        let mut input = trace::Input::default();
+        // let mut input = trace::Input::default();
 
-        let input_address = u64::from_str_radix(self.input_address.trim_start_matches("0x"), 16)
-            .wrap_err_with(|| "can't parse input address")?;
+        // let input_address = u64::from_str_radix(self.input_address.trim_start_matches("0x"), 16)
+        //     .wrap_err_with(|| "can't parse input address")?;
 
-        input.address = input_address;
-        fuzz_params.input = input_address;
+        // input.address = input_address;
+        // fuzz_params.input = input_address;
 
-        let input_size = u64::from_str_radix(self.input_size.trim_start_matches("0x"), 16)
-            .wrap_err_with(|| "can't parse input size")?;
+        // let input_size = u64::from_str_radix(self.input_size.trim_start_matches("0x"), 16)
+        //     .wrap_err_with(|| "can't parse input size")?;
 
-        input.size = input_size;
-        fuzz_params.input_size = input_size;
+        // input.size = input_size;
+        // fuzz_params.input_size = input_size;
 
         let snapshot_path = &self.snapshot;
 
-        progress.single("checking snapshot");
+        progress.single("Checking snapshot");
         let buffer;
 
         let _snapshot = if snapshot_path.join("mem.dmp").exists() {
@@ -117,10 +117,10 @@ impl FuzzerInit {
         std::fs::create_dir(path.join("traces"))?;
         std::fs::create_dir(path.join("instances"))?;
 
-        progress.single("writing params");
+        progress.single("Writing fuzzer parameters");
         fuzz_params.snapshot_path =  std::fs::canonicalize(snapshot_path)?;
         fuzz_params.save(path.join("params.json"))?;
-        input.save(path.join("input.json"))?;
+        // input.save(path.join("input.json"))?;
 
         Ok(())
     }
@@ -159,14 +159,14 @@ pub struct FuzzerRun {
     pub workdir: std::path::PathBuf,
 
     /// Mutations to apply
-    #[clap(long="mutation", parse(from_os_str))]
+    #[clap(parse(from_os_str))]
     pub mutation: std::path::PathBuf,
 
 }
 
 impl FuzzerRun {
 
-    fn run<C: Rewind>(&self, cli: &C) -> Result<(), Report> {
+    fn _run<C: Rewind>(&self, cli: &C) -> Result<(), Report> {
         let progress = helpers::start();
         let progress = progress.enter("Launching fuzzer");
 
@@ -182,7 +182,7 @@ impl FuzzerRun {
 
         let desc = mutation::StructDesc::load(&self.mutation)?;
 
-        let mutator: mutation::Mutator = desc.try_into()?;
+        let mutator: mutation::Mutator = desc.fields.try_into()?;
         // FIXME: strategy should be check from param
         // FIXME: strategy params should be in args too
         // FIXME: input mutation should be in mutation hints
@@ -220,7 +220,7 @@ impl FuzzerRun {
 
         let mut fuzzer = fuzz::Fuzzer::new(&self.workdir)?;
 
-        progress.single(format!("Fuzzing function {:x} with input {:x} ({:x})", context.rip, fuzz_params.input, fuzz_params.input_size));
+        progress.single(format!("Start fuzzing of function located at {:x})", context.rip));
 
         let mut tracer = match self.backend {
             crate::BackendType::Bochs => {
@@ -278,6 +278,111 @@ impl FuzzerRun {
         Ok(())
     }
 
+    fn run2<C: Rewind>(&self, cli: &C) -> Result<(), Report> {
+        let progress = helpers::start();
+        let progress = progress.enter("Launching fuzzer");
+
+        progress.single("Loading parameters");
+        let input_path = self.workdir.join("params.json");
+        let mut fuzz_params = fuzz::Params::load(&input_path)?;
+ 
+        fuzz_params.max_duration = std::time::Duration::from_secs(self.max_time);
+        fuzz_params.max_iterations = self.max_iterations;
+        fuzz_params.stop_on_crash = self.stop_on_crash;
+
+        progress.single("Loading snapshot");
+        let snapshot_path = &fuzz_params.snapshot_path;
+        let buffer;
+
+        let snapshot = if snapshot_path.join("mem.dmp").exists() {
+            let dump_path = snapshot_path.join("mem.dmp");
+
+            let fp = std::fs::File::open(&dump_path).wrap_err(format!("Can't load snapshot {}", dump_path.display()))?;
+            buffer = unsafe { MmapOptions::new().map(&fp)? };
+
+            // FIXME: ugly
+            let static_buffer: &'static [u8] = Box::leak(Box::new(buffer));
+            let snapshot = DumpSnapshot::new(static_buffer)?;
+            SnapshotKind::DumpSnapshot(snapshot)
+        } else {
+            let snapshot = FileSnapshot::new(&snapshot_path)?;
+            SnapshotKind::FileSnapshot(snapshot)
+        };
+
+        let context_path = snapshot_path.join("context.json");
+        let context = trace::ProcessorState::load(&context_path)?;
+
+        let params_path = snapshot_path.join("params.json");
+        let mut trace_params = trace::Params::load(&params_path)?;
+
+        trace_params.coverage_mode = self.coverage.clone();
+        trace_params.max_duration = std::time::Duration::from_secs(self.max_time);
+
+        progress.single("Loading strategy");
+        let input_desc = rewind_core::mutation::InputDesc::load(&self.mutation)
+            .wrap_err(format!("Can't load input description {}", self.mutation.display()))?;
+
+        let mut strategy = crate::fuzz::FairStrategy::new(self.workdir.clone(), input_desc, &trace_params)?;
+
+        let mut fuzzer = fuzz::Fuzzer::new(&self.workdir)?;
+
+        progress.single(format!("Fuzzing function located at {:x}", context.rip));
+
+        let mut tracer = match self.backend {
+            crate::BackendType::Bochs => {
+                Backend::Bochs(rewind_bochs::BochsTracer::new(&snapshot))
+            },
+            #[cfg(windows)]
+            crate::BackendType::Whvp => {
+                Backend::Whvp(rewind_whvp::WhvpTracer::new(&snapshot)?)
+            }
+            #[cfg(unix)]
+            crate::BackendType::Kvm => {
+                Backend::Kvm(rewind_kvm::KvmTracer::new(snapshot)?)
+            }
+        };
+        
+        let mut corpus = corpus::Corpus::new(&self.workdir);
+
+        let mut hook = cli.create_fuzzer_hook();
+
+        // FIXME: handle properly ctrlc
+
+        let progress_bar = indicatif::ProgressBar::new_spinner();
+        progress_bar.enable_steady_tick(250);
+        progress_bar.set_style(indicatif::ProgressStyle::default_spinner().template("{spinner} {elapsed} {msg}"));
+
+        let mut last_updated = std::time::Instant::now();
+
+        fuzzer.callback( move |stats| {
+            if last_updated.elapsed() > std::time::Duration::from_millis(1000) {
+                let elapsed = chrono::Utc::now() - stats.start;
+                let num_seconds = std::cmp::max(1, elapsed.num_seconds());
+
+                let message = format!("{} iterations, {} exec/s, coverage {}, mapped pages {} ({}), corpus {}, crashes {}",
+                    stats.iterations,
+                    stats.iterations / num_seconds as u64,
+                    stats.coverage,
+                    stats.mapped_pages,
+                    indicatif::HumanBytes((stats.mapped_pages * 0x1000) as u64),
+                    stats.corpus_size,
+                    stats.crashes);
+
+                progress_bar.set_message(&message);
+                last_updated = std::time::Instant::now();
+            }
+            if stats.done {
+                progress_bar.finish_and_clear();
+            }
+        });
+
+        let stats = fuzzer.run2(&mut corpus, &mut strategy, &fuzz_params, &mut tracer, &context, &trace_params, &mut hook)?;
+
+        progress.single(format!("Session ended after {:?} and {} iteration(s), got {} crash(es)",
+            stats.elapsed(), stats.iterations, stats.crashes));
+
+        Ok(())
+    }
 }
 
 
