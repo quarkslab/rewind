@@ -238,10 +238,13 @@ impl <S: Snapshot> hook::Hooks for BochsHooks <'_, S> {
                 hook::MemAccess::RW => trace::MemAccessType::RW,
             };
 
-            // println!("reading gva: {:x} size: {:x}", vaddr, len);
-            // let (rip, _context) = trace.coverage.last().unwrap();
+            // println!("reading gva: {:x} size: {:x} gpa {:x}", vaddr, len, gpa);
+            // skipping apic page
+            // FIXME: should not be hardcoded
             let mut data = vec![0u8; len];
-            guest_mem::virt_read_slice_checked(cr3, vaddr, &mut data).unwrap();
+            if gpa & !0xfff != 0xfee00000 {
+                guest_mem::virt_read_slice_checked(cr3, vaddr, &mut data).unwrap();
+            }
      
             let access = trace::MemAccess {
                 rip,
@@ -591,6 +594,57 @@ impl <'a, S: Snapshot> Tracer for BochsTracer <'a, S> {
 
     }
 
+    fn run_with_trace<H: trace::Hook>(&mut self, params: &Params, hook: &mut H, _trace: &mut Trace) -> Result<(), TracerError> {
+        let c = Cpu::from(0);
+        let start = Instant::now();
+
+        self.hooks.trace = Some(Trace::new());
+        
+        // FIXME: need to work around lifetime issues
+        self.hooks.params = Some(Params::default());
+        if let Some(p) = self.hooks.params.as_mut() {
+            p.return_address = params.return_address;
+            p.save_context = params.save_context;
+            p.max_duration = params.max_duration;
+            p.coverage_mode = params.coverage_mode.clone();
+            p.excluded_addresses = params.excluded_addresses.clone();
+            p.limit = params.limit;
+        }
+
+        hook.setup(self);
+
+        loop {
+
+            self.hooks.breakpoints.extend(self.breakpoints.iter());
+            unsafe { c.prepare().register(&mut self.hooks).run() };
+
+            match self.hooks.trace.as_ref().unwrap().status {
+                EmulationStatus::Breakpoint => {
+                    hook.handle_breakpoint(self)?;
+                    self.hooks.singlestep = true;
+
+                },
+                EmulationStatus::SingleStep => {
+                    self.hooks.singlestep = false;
+                },
+                _ => {
+                    break
+                }
+            }
+        }   
+
+        let mut trace = self.hooks.trace.take().unwrap();
+        hook.handle_trace(&mut trace)?;
+
+        let end = Instant::now();
+
+        self.dirty.append(&mut self.hooks.dirty);
+        trace.start = Some(start);
+        trace.end = Some(end);
+        _trace.seen.append(&mut trace.seen);
+        Ok(())
+    }
+
     fn restore_snapshot(&mut self) -> Result<usize, TracerError> {
         for page in &self.dirty {
             let buffer = unsafe { guest_mem::mem().get(page) };
@@ -642,18 +696,39 @@ impl <'a, S: Snapshot> Tracer for BochsTracer <'a, S> {
         Ok(unsafe { c.cr3() })
     }
 
-    fn singlestep<H: trace::Hook>(&mut self, _params: &Params, _hook: &mut H) -> Result<Trace, TracerError> {
+    fn singlestep<H: trace::Hook>(&mut self, params: &Params, hook: &mut H) -> Result<Trace, TracerError> {
         let c = Cpu::from(0);
-        // let start = Instant::now();
+        let start = Instant::now();
 
-        let trace: Trace = Trace::new();
         self.hooks.singlestep = true;
         self.hooks.breakpoints.extend(self.breakpoints.iter());
- 
-        unsafe { c.prepare().run() };
+        self.hooks.trace = Some(Trace::new());
+
+        // FIXME: need to work around lifetime issues
+        self.hooks.params = Some(Params::default());
+        if let Some(p) = self.hooks.params.as_mut() {
+            p.return_address = params.return_address;
+            p.save_context = params.save_context;
+            p.max_duration = params.max_duration;
+            p.coverage_mode = params.coverage_mode.clone();
+            p.excluded_addresses = params.excluded_addresses.clone();
+            p.limit = params.limit;
+        }
+
+        hook.setup(self);
+
+        unsafe { c.prepare().register(&mut self.hooks).run() };
 
         // trace!("executed {} instructions ({}) in {:?}", hooks.instructions_count, hooks.coverage.len(), start.elapsed());
         // trace!("seen {} unique addresses, dirty pages {}", hooks.seen.len(), hooks.dirty.len());
+        let mut trace = self.hooks.trace.take().unwrap();
+        hook.handle_trace(&mut trace)?;
+
+        let end = Instant::now();
+
+        self.dirty.append(&mut self.hooks.dirty);
+        trace.start = Some(start);
+        trace.end = Some(end);
 
         Ok(trace)
 
@@ -684,144 +759,3 @@ impl <'a, S: Snapshot> mem::X64VirtualAddressSpace for BochsTracer <'a, S> {
 
 }
 
-#[cfg(test)]
-mod test {
-    use mem::X64VirtualAddressSpace;
-
-    use super::*;
-
-    use std::io::Read;
-
-    #[derive(Default)]
-    struct TestHook {
-
-    }
-
-    impl trace::Hook for TestHook {
-        fn setup<T: trace::Tracer>(&mut self, _tracer: &mut T) {
-
-        }
-
-        fn handle_breakpoint<T: trace::Tracer>(&mut self, _tracer: &mut T) -> Result<bool, trace::TracerError> {
-            todo!()
-        }
-
-        fn handle_trace(&self, _trace: &mut trace::Trace) -> Result<bool, trace::TracerError> {
-            Ok(true)
-        }
-
-        fn patch_page(&self, _: u64) -> bool {
-            todo!()
-        }
-    }
-
-    #[derive(Default)]
-    struct TestSnapshot {
-
-    }
-
-    impl Snapshot for TestSnapshot {
-
-        fn read_gpa(&self, gpa: u64, buffer: &mut [u8]) -> Result<(), rewind_core::snapshot::SnapshotError> {
-            let base = gpa & !0xfff;
-            let offset = (gpa & 0xfff) as usize;
-
-            let mut data = vec![0u8; 0x1000];
-            let path = std::path::PathBuf::from(format!("../tests/sdb/mem/{:016x}.bin", base));
-            let mut fp = std::fs::File::open(path).unwrap();
-            fp.read_exact(&mut data).unwrap();
-            buffer.copy_from_slice(&data[offset..offset+buffer.len()]);
-            Ok(())
-        }
-
-        fn get_cr3(&self) -> u64 {
-            todo!()
-        }
-
-        fn get_module_list(&self) -> u64 {
-            todo!()
-        }
-    }
-
-    impl X64VirtualAddressSpace for TestSnapshot {
-
-        fn read_gpa(&self, gpa: mem::Gpa, buf: &mut [u8]) -> Result<(), mem::VirtMemError> {
-            Snapshot::read_gpa(self, gpa, buf).map_err(|_e| mem::VirtMemError::MissingPage(gpa))
-        }
-
-        fn write_gpa(&mut self, _gpa: mem::Gpa, _data: &[u8]) -> Result<(), mem::VirtMemError> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn test_tracer() {
-
-        let path = std::path::PathBuf::from("../tests/sdb");
-        let snapshot = TestSnapshot::default();
-
-        let mut tracer = BochsTracer::new(&snapshot);
-        let context = trace::ProcessorState::load(path.join("context.json")).unwrap();
-        let mut params = trace::Params::default();
-        let mut hook = TestHook::default();
-
-        params.return_address = snapshot.read_gva_u64(context.cr3, context.rsp).unwrap();
-        params.save_context = true;
-
-        tracer.set_state(&context).unwrap();
-        let trace = tracer.run(&params, &mut hook).unwrap();
-
-        let expected = Trace::load(path.join("trace.json")).unwrap();
-
-        for (index, (addr, context)) in expected.coverage.iter().enumerate() {
-            assert_eq!(*addr, trace.coverage[index].0);
-            if let Some(context) = context {
-                let expected_context = trace.coverage[index].1.as_ref().unwrap();
-                // rflags are different so they are not tested
-                assert_eq!(context.rax, expected_context.rax);
-                assert_eq!(context.rbx, expected_context.rbx);
-                assert_eq!(context.rcx, expected_context.rcx);
-                assert_eq!(context.rdx, expected_context.rdx);
-                assert_eq!(context.rsi, expected_context.rsi);
-                assert_eq!(context.rdi, expected_context.rdi);
-                assert_eq!(context.rsp, expected_context.rsp);
-                assert_eq!(context.rbp, expected_context.rbp);
-                assert_eq!(context.r8, expected_context.r8);
-                assert_eq!(context.r9, expected_context.r9);
-                assert_eq!(context.r10, expected_context.r10);
-                assert_eq!(context.r11, expected_context.r11);
-                assert_eq!(context.r12, expected_context.r12);
-                assert_eq!(context.r13, expected_context.r13);
-                assert_eq!(context.r14, expected_context.r14);
-                assert_eq!(context.r15, expected_context.r15);
-                assert_eq!(context.rip, expected_context.rip);
-                assert_eq!(*addr, expected_context.rip);
-
-            }
-
-            assert_eq!(expected.seen.contains(addr), true);
-            assert_eq!(trace.seen.contains(addr), true);
-
-        }
-
-        assert_eq!(trace.seen.len(), 2913);
-        assert_eq!(trace.coverage.len(), 59120);
-        assert_eq!(trace.immediates.len(), 22);
-        assert_eq!(trace.mem_accesses.len(), 16650);
-
-        assert_eq!(trace.status, trace::EmulationStatus::Success);
-
-        assert_eq!(trace.coverage[0].0, context.rip);
-
-        let state = tracer.get_state().unwrap();
-
-        assert_eq!(state.rip, params.return_address);
-
-        let pages = tracer.get_mapped_pages().unwrap();
-
-        assert_eq!(pages, 80);
-
-    }
-
-
-}

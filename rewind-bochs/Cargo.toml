@@ -12,3 +12,7 @@ log = { version = "0.4.8", features = ["release_max_level_info"] }
 bochscpu = { path = "../vendor/bochscpu" }
 rewind-core = { path = "../rewind-core" }
 lazy_static = "1.4.0"
+
+[dev-dependencies]
+rewind-snapshot = { path = "../rewind-snapshot" }
+
