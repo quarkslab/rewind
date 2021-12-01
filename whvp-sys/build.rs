@@ -29,6 +29,7 @@ fn main() {
         .allowlist_function("WHvRunVirtualProcessor")
         .allowlist_type("WHV_CAPABILITY")
         .allowlist_type("WHV_EXTENDED_VM_EXITS")
+        .allowlist_type("WHV_X64_LOCAL_APIC_EMULATION_MODE")
         .allowlist_type("WHV_REGISTER_NAME")
         .allowlist_type("WHV_REGISTER_VALUE")
         .allowlist_type("WHV_RUN_VP_EXIT_CONTEXT")

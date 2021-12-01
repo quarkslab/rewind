@@ -826,6 +826,7 @@ impl Partition {
 
         partition.set_extended_vm_exits()?;
 
+        partition.set_apic_emulation()?;
         // FIXME in args
         // let vmexit_bitmap: u64 = (1 << 1) | (1 << 14);
         let vmexit_bitmap: u64 = (1 << 1) | (1 << 3);
@@ -883,6 +884,26 @@ impl Partition {
             }
         }
     }
+
+    fn set_apic_emulation(&mut self) -> Result<(), PartitionError> {
+        let apic_mode = WHV_X64_LOCAL_APIC_EMULATION_MODE_WHvX64LocalApicEmulationModeXApic;
+        let hr = unsafe {
+            WHvSetPartitionProperty(
+                self.handle,
+                WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeLocalApicEmulationMode,
+                &apic_mode as *const i32 as *const c_void,
+                std::mem::size_of_val(&apic_mode) as u32
+            )
+        };
+        match hr {
+            0 => { Ok(()) },
+            _ => {
+                let msg = format!("WHvSetPartitionProperty failed with {:#x}", hr);
+                Err(PartitionError::new(msg))
+            }
+        }
+    }
+
 
     fn set_exception_bitmap(&mut self, bitmap: u64) -> Result<(), PartitionError> {
         let hr = unsafe {
