@@ -19,4 +19,7 @@ whvp-sys = { path = "../whvp-sys" }
 [dev-dependencies]
 pretty_assertions = "0.6.1"
 rewind-snapshot = { path = "../rewind-snapshot" }
+flate2 = "1.0.22"
+tar = "0.4.37"
+
 
