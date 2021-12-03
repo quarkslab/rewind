@@ -642,6 +642,9 @@ impl <'a, S: Snapshot> Tracer for BochsTracer <'a, S> {
         trace.start = Some(start);
         trace.end = Some(end);
         _trace.seen.append(&mut trace.seen);
+        _trace.start = trace.start;
+        _trace.end = trace.end;
+        _trace.status = trace.status;
         Ok(())
     }
 

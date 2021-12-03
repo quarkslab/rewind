@@ -874,7 +874,7 @@ impl Field for WStr {
     }
 
     fn size(&self) -> usize {
-        self.size
+        2 * (self.size + 1)
     }
 
     // FIXME: read orig as wstr

@@ -476,7 +476,7 @@ fn replay_file<H: trace::Hook>(tx: &flume::Sender<Message>,
         tracer: &mut rewind_bochs::BochsTracer<SnapshotKind>,
         context: &trace::ProcessorState,
         trace_params: &trace::Params,
-        fuzz_params: &fuzz::Params) -> Result<trace::Trace, TuiError> {
+        input_desc: &rewind_core::mutation::InputDesc) -> Result<trace::Trace, TuiError> {
 
     let file_name = path.file_name().unwrap().to_str().unwrap();
     tx.send(Message::Log(format!("replaying input {}", file_name)))?;
@@ -487,11 +487,10 @@ fn replay_file<H: trace::Hook>(tx: &flume::Sender<Message>,
 
     let cr3 = context.cr3;
 
-    match Tracer::write_gva(tracer, cr3, fuzz_params.input, &data) {
-        Ok(()) => {}
-        Err(e) => {
-            return Err(TuiError::TracerError(e));
-        }
+    for item in input_desc.items.iter() { 
+        let slice = &data[item.offset..item.offset+item.size];
+        tx.send(Message::Log(format!("writing input ({:x} bytes) to {:x} (cr3 {:x})", slice.len(), item.address, cr3)))?;
+        Tracer::write_gva(tracer, cr3, item.address, slice)?;
     }
 
     tracer.set_state(context)?;
@@ -518,7 +517,7 @@ fn replay_file<H: trace::Hook>(tx: &flume::Sender<Message>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_coverage<S: Snapshot + X64VirtualAddressSpace>(workdir: &Path, system: &System<S>, store: &mut PdbStore, corpus_path: PathBuf, fuzz_params: &fuzz::Params, mut trace: trace::Trace, modified_pages: usize, collection: &mut Collection, hints: &mut mutation::MutationHint, tx: &flume::Sender<Message> ) -> Result<(), TuiError> {
+fn update_coverage<S: Snapshot + X64VirtualAddressSpace>(workdir: &Path, system: &System<S>, store: &mut PdbStore, corpus_path: PathBuf, _fuzz_params: &fuzz::Params, mut trace: trace::Trace, modified_pages: usize, collection: &mut Collection, hints: &mut mutation::MutationHint, tx: &flume::Sender<Message> ) -> Result<(), TuiError> {
 
     let mut corpus_file = CorpusFile::new(corpus_path.file_name().unwrap());
     corpus_file.seen = trace.seen.len() as u64;
@@ -537,20 +536,20 @@ fn update_coverage<S: Snapshot + X64VirtualAddressSpace>(workdir: &Path, system:
     tx.send(Message::Coverage(functions))?;
 
     hints.immediates.append(&mut trace.immediates);
-    let address = fuzz_params.input;
-    let size = fuzz_params.input_size;
-    let filtered = trace.mem_accesses.iter()
-        .filter(|a| {
-            a.vaddr >= address && a.vaddr < address + size
-        })
-        .map(|a| {
-            a.vaddr - address
-        });
+    // let address = fuzz_params.input;
+    // let size = fuzz_params.input_size;
+    // let filtered = trace.mem_accesses.iter()
+    //     .filter(|a| {
+    //         a.vaddr >= address && a.vaddr < address + size
+    //     })
+    //     .map(|a| {
+    //         a.vaddr - address
+    //     });
 
-    hints.offsets.extend(filtered);
+    // hints.offsets.extend(filtered);
 
     if trace.seen.is_subset(&collection.coverage) {
-        tx.send(Message::Log(format!("removing {}", corpus_path.display())))?;
+        tx.send(Message::Log(format!("coverage didn't increased, removing {}", corpus_path.display())))?;
         std::fs::remove_file(&corpus_path)?;
     } else {
         match trace.status {
@@ -575,7 +574,7 @@ fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>,
         let control = control_rx.recv()?;
 
         match control {
-            Control::Start((workdir, store)) => {
+            Control::Start((workdir, store, input_desc)) => {
                 let input_path = workdir.join("params.json");
                 let fuzz_params = fuzz::Params::load(&input_path)?;
 
@@ -634,16 +633,18 @@ fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>,
                 entries.extend(crash_entries);
                 entries.sort();
 
+                let input_desc = rewind_core::mutation::InputDesc::load(&input_desc)?;
+
                 for path in entries {
                     if path.extension() == Some(std::ffi::OsStr::new("bin")) {
-                        let trace = replay_file::<H>(&tx, &path, &mut tracer, &context, &trace_params, &fuzz_params)?;
+                        let trace = replay_file::<H>(&tx, &path, &mut tracer, &context, &trace_params, &input_desc)?;
                         let modified_pages = tracer.restore_snapshot()?;
                         update_coverage(&workdir, &system, &mut store, path, &fuzz_params, trace, modified_pages, &mut collection, &mut hints, &tx)?;
                     }
                 }
-                let path = workdir.join("snapshot");
-                snapshot.save(path)?;
-                 
+                // let path = workdir.join("snapshot");
+                // snapshot.save(path)?;
+
                 tx.send(Message::TotalCoverage(collection.coverage.len()))?;
                 tx.send(Message::Log(format!("updating mutation hints: immediates {}, offsets {}", hints.immediates.len(), hints.offsets.len())))?;
                 let path = workdir.join("hints.json");
@@ -662,7 +663,7 @@ fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>,
                     if let Ok(event)  = watcher_rx.recv() {
                         match event {
                             watch::Event::Create { path, .. } => {
-                                let trace = replay_file::<H>(&tx, &path, &mut tracer, &context, &trace_params, &fuzz_params)?;
+                                let trace = replay_file::<H>(&tx, &path, &mut tracer, &context, &trace_params, &input_desc)?;
                                 let modified_pages = tracer.restore_snapshot()?;
                                 update_coverage(&workdir, &system, &mut store, path, &fuzz_params, trace, modified_pages, &mut collection, &mut hints, &tx)?;
                                 tx.send(Message::TotalCoverage(collection.coverage.len()))?;
@@ -690,7 +691,7 @@ fn collect_coverage_thread<H: trace::Hook>(control_rx: flume::Receiver<Control>,
 
 #[derive(Debug)]
 pub enum Control {
-    Start((std::path::PathBuf, std::path::PathBuf)),
+    Start((std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)),
     Stop,
 }
 
@@ -725,7 +726,7 @@ fn collect_instances_thread(control_rx: flume::Receiver<Control>, tx: flume::Sen
     loop {
         let control = control_rx.recv()?;
         match control {
-            Control::Start((workdir, _store)) => {
+            Control::Start((workdir, _store, _input_desc)) => {
                 loop {
                     let path = workdir.join("instances");
                     let mut entries = std::fs::read_dir(&path)?
@@ -765,7 +766,7 @@ fn collect_instances_thread(control_rx: flume::Receiver<Control>, tx: flume::Sen
 
 
 /// Display TUI
-pub fn display_tui<H: trace::Hook>(workdir: PathBuf, store: PathBuf) -> Result<(), TuiError> {
+pub fn display_tui<H: trace::Hook>(workdir: PathBuf, store: PathBuf, input_desc: PathBuf) -> Result<(), TuiError> {
     let (tx, rx) = flume::unbounded();
     let (control_instance_tx, control_instance_rx) = flume::unbounded();
     let (control_coverage_tx, control_coverage_rx) = flume::unbounded();
@@ -773,8 +774,8 @@ pub fn display_tui<H: trace::Hook>(workdir: PathBuf, store: PathBuf) -> Result<(
     start_coverage_collector_thread::<H>(control_coverage_rx, tx.clone());
     start_instances_collector_thread(control_instance_rx, tx.clone());
 
-    control_coverage_tx.send(Control::Start((workdir.clone(), store.clone())))?;
-    control_instance_tx.send(Control::Start((workdir, store)))?;
+    control_coverage_tx.send(Control::Start((workdir.clone(), store.clone(), input_desc.clone())))?;
+    control_instance_tx.send(Control::Start((workdir, store, input_desc)))?;
 
     let stdout_val = setup_terminal()?;
 
