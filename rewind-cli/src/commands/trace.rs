@@ -12,14 +12,14 @@ use rewind_tui::{Collection, parse_trace};
 use crate::{Rewind, cli::Backend, helpers::{self, decode_instruction, format_instruction}};
 
 
-#[derive(Clap, Debug)]
 /// Do stuff with traces.
-pub(crate) struct Trace {
+#[derive(Clap, Debug)]
+pub(crate) struct TraceCmd {
     #[clap(subcommand)]
     subcmd: TraceSubCommand
 }
 
-impl Trace {
+impl TraceCmd {
 
     pub(crate) fn run<C: Rewind>(&self, cli: &C) -> Result<(), Report> {
         match &self.subcmd {

@@ -4,7 +4,7 @@ mod snapshot;
 mod trace;
 mod mutation;
 
-pub(crate) use snapshot::Snapshot;
-pub(crate) use trace::Trace;
-pub(crate) use fuzz::Fuzz as FuzzCommand;
-pub(crate) use mutation::Mutation;
+pub(crate) use snapshot::SnapshotCmd;
+pub(crate) use trace::TraceCmd;
+pub(crate) use fuzz::FuzzCmd;
+pub(crate) use mutation::MutationCmd;

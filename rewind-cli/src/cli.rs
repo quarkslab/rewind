@@ -9,7 +9,7 @@ use rewind_core::{mutation, snapshot, trace::{self, Tracer, TracerError}};
 use rewind_core::mem::{X64VirtualAddressSpace, VirtMemError};
 use rewind_core::fuzz;
 
-use crate::commands::{FuzzCommand, Mutation, Snapshot, Trace};
+use crate::commands::{FuzzCmd, MutationCmd, SnapshotCmd, TraceCmd};
 
 /// Backend
 #[allow(clippy::large_enum_variant)]
@@ -210,7 +210,19 @@ pub trait Rewind {
 
 /// PoC for a snapshot-based coverage-guided fuzzer targeting Windows kernel components.
 #[derive(Clap, Debug)]
-#[clap(name="rewind", version="0.1.0")]
+#[clap(
+    name="rewind",
+    bin_name="rewind",
+    version="0.1.0",
+    author="Damien Aumaitre <daumaitre@quarkslab.com>",
+    setting = clap::AppSettings::DisableHelpSubcommand,
+    setting = clap::AppSettings::DeriveDisplayOrder,
+    setting = clap::AppSettings::InferSubcommands,
+    setting = clap::AppSettings::GlobalVersion,
+    setting = clap::AppSettings::HelpRequired,
+)]
+
+// FIXME: will need to revisit when https://github.com/clap-rs/clap/issues/1431 is done
 struct RewindArgs {
     #[clap(subcommand)]
     subcmd: SubCommand,
@@ -223,10 +235,10 @@ impl RewindArgs {
 
 #[derive(Clap, Debug)]
 enum SubCommand {
-    Snapshot(Snapshot),
-    Trace(Trace),
-    Fuzz(FuzzCommand),
-    Mutate(Mutation)
+    Snapshot(SnapshotCmd),
+    Trace(TraceCmd),
+    Fuzz(FuzzCmd),
+    Mutate(MutationCmd)
 }
 
 /// CLI

@@ -9,14 +9,14 @@ use rewind_core::mutation::Mutator;
 
 use crate::helpers;
 
-/// Manage snapshots.
+/// View and debug mutations.
 #[derive(Clap, Debug)]
-pub(crate) struct Mutation {
+pub(crate) struct MutationCmd {
     #[clap(subcommand)]
     subcmd: MutationSubCommand
 }
 
-impl Mutation {
+impl MutationCmd {
 
     pub(crate) fn run(&self) -> Result<(), Report> {
         match &self.subcmd {

@@ -13,12 +13,12 @@ use crate::helpers::{self, parse_hex};
 
 /// Manage snapshots.
 #[derive(Clap, Debug)]
-pub(crate) struct Snapshot {
+pub(crate) struct SnapshotCmd {
     #[clap(subcommand)]
     subcmd: SnapshotSubCommand
 }
 
-impl Snapshot {
+impl SnapshotCmd {
 
     pub(crate) fn run(&self) -> Result<(), Report> {
         match &self.subcmd {
