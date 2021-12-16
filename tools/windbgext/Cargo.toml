@@ -1,0 +1,26 @@
+[package]
+name = "windbgext"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+argh = "0.1.7"
+shlex = "1.1.0"
+serde_json = "1.0.51"
+serde = { version = "1.0.106", features = ["derive"] }
+serde_yaml = "0.8.17"
+bit_field = "0.10.1"
+
+[dependencies.windows]
+version = "0.28.0"
+features = [
+    "alloc",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+]
